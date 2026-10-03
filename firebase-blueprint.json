@@ -1,0 +1,72 @@
+{
+  "entities": {
+    "Alert": {
+      "title": "Alert",
+      "description": "Signalement d'événement routier sur le corridor Yaoundé - Bafoussam (N4)",
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["ACCIDENT", "VEHICULE_IMMOBILISE", "FORTE_PLUIE", "OBSTACLE", "RALENTISSEMENT"],
+          "description": "Type d'incident routier"
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 250,
+          "description": "Description textuelle synthétique de l'alerte"
+        },
+        "location": {
+          "type": "string",
+          "maxLength": 100,
+          "description": "Secteur ou repère géographique"
+        },
+        "direction": {
+          "type": "string",
+          "maxLength": 100,
+          "description": "Sens de circulation (ex: Bafoussam ou Yaoundé)"
+        },
+        "route": {
+          "type": "string",
+          "maxLength": 100,
+          "description": "Axe routier (ex: Yaoundé-Bafoussam)"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["CONFIRMED", "DRAFT", "CANCELLED"],
+          "description": "Statut de validation de l'alerte"
+        },
+        "confirmationCount": {
+          "type": "number",
+          "description": "Nombre de confirmations de chauffeurs enregistrées"
+        },
+        "audioUrl": {
+          "type": "string",
+          "description": "URL ou identifiant de l'enregistrement audio"
+        },
+        "audioTranscript": {
+          "type": "string",
+          "maxLength": 500,
+          "description": "Transcription textuelle du message vocal radio"
+        },
+        "createdBy": {
+          "type": "string",
+          "maxLength": 100,
+          "description": "Identité ou matricule du chauffeur déclarant"
+        },
+        "createdAt": {
+          "type": "number",
+          "description": "Timestamp unix de création"
+        }
+      },
+      "required": ["type", "description", "location", "direction", "route", "status", "confirmationCount", "createdBy", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/alerts/{alertId}": {
+      "schema": {
+        "$ref": "#/entities/Alert"
+      },
+      "description": "Collection partagée des alertes routières actives de la communauté de chauffeurs"
+    }
+  }
+}

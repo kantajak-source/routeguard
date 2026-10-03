@@ -1,0 +1,89 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidAlert(data) {
+      return data.type in ['ACCIDENT', 'VEHICULE_IMMOBILISE', 'FORTE_PLUIE', 'OBSTACLE', 'RALENTISSEMENT']
+        && data.description is string && data.description.size() <= 250
+        && data.location is string && data.location.size() <= 100
+        && data.direction is string && data.direction.size() <= 100
+        && data.route is string && data.route.size() <= 100
+        && data.status in ['CONFIRMED', 'DRAFT', 'CANCELLED']
+        && data.confirmationCount is number && data.confirmationCount >= 1
+        && data.createdBy is string && data.createdBy.size() <= 100
+        && data.createdAt is number
+        && (!('latitude' in data) || (data.latitude is number && data.latitude >= -90 && data.latitude <= 90))
+        && (!('longitude' in data) || (data.longitude is number && data.longitude >= -180 && data.longitude <= 180))
+        && (!('accuracy' in data) || (data.accuracy is number && data.accuracy >= 0));
+    }
+
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Health-check probe for client connectivity verification
+    match /test/{docId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // Corridor N4 Alerts collection
+    match /alerts/{alertId} {
+      // Drivers can read live road alerts on the corridor
+      allow read: if true;
+
+      // Create: strictly authenticated, valid schema, confirmed status, count = 1, and createdByUid == request.auth.uid
+      allow create: if request.auth != null
+        && isValidId(alertId)
+        && isValidAlert(request.resource.data)
+        && request.resource.data.status == 'CONFIRMED'
+        && request.resource.data.confirmationCount == 1
+        && request.resource.data.createdByUid == request.auth.uid
+        && 'confirmedByUids' in request.resource.data
+        && request.resource.data.confirmedByUids is list
+        && request.resource.data.confirmedByUids.size() == 1
+        && request.resource.data.confirmedByUids[0] == request.auth.uid;
+
+      // Update: allow community driver confirmations (+1 confirmationCount)
+      allow update: if request.auth != null
+        && isValidId(alertId)
+        && isValidAlert(request.resource.data)
+        && request.resource.data.confirmationCount == resource.data.confirmationCount + 1
+        && (
+          // Cas 1 : Nouvelles alertes (possédant déjà confirmedByUids)
+          (
+            'confirmedByUids' in resource.data
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['confirmationCount', 'confirmedBy', 'confirmedByUids'])
+            && request.resource.data.confirmedByUids is list
+            && !(request.auth.uid in resource.data.confirmedByUids)
+            && (request.auth.uid in request.resource.data.confirmedByUids)
+            && request.resource.data.confirmedByUids.size() == resource.data.confirmedByUids.size() + 1
+          )
+          ||
+          // Cas 2 : Anciennes alertes (sans confirmedByUids initialement)
+          (
+            !('confirmedByUids' in resource.data)
+            && (
+              request.resource.data.diff(resource.data).affectedKeys().hasOnly(['confirmationCount', 'confirmedBy'])
+              ||
+              (
+                request.resource.data.diff(resource.data).affectedKeys().hasOnly(['confirmationCount', 'confirmedBy', 'confirmedByUids'])
+                && request.resource.data.confirmedByUids is list
+                && (request.auth.uid in request.resource.data.confirmedByUids)
+              )
+            )
+          )
+        );
+
+      // Deletion is protected
+      allow delete: if false;
+    }
+  }
+}

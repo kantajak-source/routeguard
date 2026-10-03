@@ -1,0 +1,6 @@
+{
+  "name": "ROUTEGUARD - Sécurité Routière Chauffeurs N4",
+  "description": "Application mobile d'alerte routière vocale avec interprétation IA pour chauffeurs professionnels sur l'axe Yaoundé - Bafoussam.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
