@@ -16,6 +16,14 @@ import { db, handleFirestoreError, OperationType } from './firebase';
 import { AlertItem, AlertRecord, AlertStatus } from '../types/routeguard';
 import { INITIAL_ALERTS } from '../data/initialAlerts';
 import { authService } from './authService';
+import {
+  corridorService,
+  filterRelevantAlerts,
+  CorridorDirection,
+  FilterRelevantAlertsResult,
+  DEFAULT_MAX_ALERT_DISTANCE_KM,
+  DEFAULT_MAX_ALERT_AGE_MINUTES,
+} from './corridorService';
 
 const CURRENT_DRIVER_KEY = 'routeguard_active_driver_v1';
 const ALERTS_COLLECTION = 'alerts';
@@ -97,7 +105,7 @@ export class FirebaseAlertService {
   /**
    * Convertit un document Firestore en objet AlertItem pour l'interface
    */
-  private mapDocToAlertItem(id: string, data: any): AlertItem {
+  public mapDocToAlertItem(id: string, data: any): AlertItem {
     const currentUid = authService.getCurrentUserId();
 
     // Détermination de userConfirmed :
@@ -122,7 +130,7 @@ export class FirebaseAlertService {
       || (data.createdBy && data.createdBy.includes(this.activeDriver))
     );
 
-    return {
+    const item: AlertItem = {
       id,
       type,
       severity,
@@ -152,6 +160,16 @@ export class FirebaseAlertService {
       longitude: typeof data.longitude === 'number' ? data.longitude : undefined,
       accuracy: typeof data.accuracy === 'number' ? data.accuracy : undefined,
     };
+
+    // ÉTAPE 5A : Conserver estimatedPk et roadAxis si présents dans Firestore (rétrocompatibilité totale)
+    if (typeof data.estimatedPk === 'number') {
+      (item as any).estimatedPk = data.estimatedPk;
+    }
+    if (typeof data.roadAxis === 'string') {
+      (item as any).roadAxis = data.roadAxis;
+    }
+
+    return item;
   }
 
   private calculateTimeAgo(timestamp: number): string {
@@ -223,6 +241,237 @@ export class FirebaseAlertService {
   }
 
   /**
+   * ÉTAPE 6A : Récupère les alertes Firestore et calcule localement lesquelles sont pertinentes pour un chauffeur.
+   * Chaîne complète : Firestore -> mapDocToAlertItem -> filterRelevantAlerts()
+   * 
+   * Ne modifie aucun document Firestore.
+   * N'effectue aucun appel GPS matériel ni Gemini.
+   */
+  public async getRelevantAlertsForDriver(
+    driverLatitude: number,
+    driverLongitude: number,
+    direction: CorridorDirection,
+    now?: number | string | Date,
+    maxDistanceKm: number = DEFAULT_MAX_ALERT_DISTANCE_KM,
+    maxAgeMinutes: number = DEFAULT_MAX_ALERT_AGE_MINUTES
+  ): Promise<FilterRelevantAlertsResult<AlertItem>> {
+    // 1. Lire les alertes depuis Firestore avec la logique existante (sans modifier les documents)
+    const alerts = await this.getAlerts();
+
+    // 2. Filtrer localement via le moteur pur de pertinence
+    return filterRelevantAlerts(
+      alerts,
+      driverLatitude,
+      driverLongitude,
+      direction,
+      now,
+      maxDistanceKm,
+      maxAgeMinutes
+    );
+  }
+
+  /**
+   * ÉTAPE 6A : Auto-diagnostic local du branchement alertService -> corridorService.
+   * Utilise des données purement simulées, SANS aucun appel Firestore, SANS GPS, SANS Gemini.
+   */
+  public runAlertServiceSelfCheck(): { name: string; passed: boolean; details: string }[] {
+    const results: { name: string; passed: boolean; details: string }[] = [];
+    const NOW_TEST = '2026-10-04T12:00:00.000Z';
+    const nowMs = Date.parse(NOW_TEST);
+
+    // TEST A : Chauffeur Obala, Alerte Bafia (83 km > 80 km) -> TOO_FAR
+    const alertA = this.mapDocToAlertItem('alert-a', {
+      type: 'ACCIDENT',
+      description: 'Accident vers Bafia',
+      latitude: 4.7500,
+      longitude: 11.2333,
+      createdAt: nowMs - 30 * 60 * 1000,
+      direction: 'Bafoussam',
+    });
+    const resA = filterRelevantAlerts([alertA], 4.1672, 11.5333, 'YAOUNDE_TO_BAFOUSSAM', NOW_TEST, 80);
+    results.push({
+      name: 'TEST A : Chauffeur Obala, Alerte Bafia (83 km > 80 km) -> TOO_FAR',
+      passed: resA.relevantAlerts.length === 0 &&
+              resA.excludedAlerts.length === 1 &&
+              resA.excludedAlerts[0]?.geographicStatus === 'TOO_FAR' &&
+              resA.excludedAlerts[0]?.reason === 'GEOGRAPHICALLY_EXCLUDED',
+      details: `relevant: ${resA.relevantAlerts.length}, excluded: ${resA.excludedAlerts.length}, geoStatus: ${resA.excludedAlerts[0]?.geographicStatus}`,
+    });
+
+    // TEST B : Chauffeur Bafia, Alerte Ombessa (20 km, FRESH 30 min) -> RELEVANT
+    const alertB = this.mapDocToAlertItem('alert-b', {
+      type: 'VEHICULE_IMMOBILISE',
+      description: 'Camion en panne Ombessa',
+      latitude: 4.6000,
+      longitude: 11.2500,
+      createdAt: nowMs - 30 * 60 * 1000,
+      direction: 'Bafoussam',
+    });
+    const resB = filterRelevantAlerts([alertB], 4.7500, 11.2333, 'YAOUNDE_TO_BAFOUSSAM', NOW_TEST, 80);
+    results.push({
+      name: 'TEST B : Chauffeur Bafia, Alerte Ombessa (20 km, FRESH) -> RELEVANT',
+      passed: resB.relevantAlerts.length === 1 &&
+              resB.relevantAlerts[0]?.relativePosition === 'AHEAD' &&
+              resB.relevantAlerts[0]?.estimatedDistanceKm === 20 &&
+              resB.relevantAlerts[0]?.ageMinutes === 30,
+      details: `relevant: ${resB.relevantAlerts.length}, rel: ${resB.relevantAlerts[0]?.relativePosition}, dist: ${resB.relevantAlerts[0]?.estimatedDistanceKm} km`,
+    });
+
+    // TEST C : Chauffeur Bafia, Alerte Ombessa vieille de 180 min -> TEMPORALLY_EXCLUDED
+    const alertC = this.mapDocToAlertItem('alert-c', {
+      type: 'VEHICULE_IMMOBILISE',
+      description: 'Panne ancienne Ombessa',
+      latitude: 4.6000,
+      longitude: 11.2500,
+      createdAt: nowMs - 180 * 60 * 1000,
+      direction: 'Bafoussam',
+    });
+    const resC = filterRelevantAlerts([alertC], 4.7500, 11.2333, 'YAOUNDE_TO_BAFOUSSAM', NOW_TEST, 80);
+    results.push({
+      name: 'TEST C : Ombessa vieille de 180 min -> TEMPORALLY_EXCLUDED',
+      passed: resC.relevantAlerts.length === 0 &&
+              resC.excludedAlerts.length === 1 &&
+              resC.excludedAlerts[0]?.reason === 'TEMPORALLY_EXCLUDED',
+      details: `relevant: ${resC.relevantAlerts.length}, reason: ${resC.excludedAlerts[0]?.reason}`,
+    });
+
+    // TEST D : Chauffeur Bafia, Alerte Yaoundé (BEHIND) -> GEOGRAPHICALLY_EXCLUDED
+    const alertD = this.mapDocToAlertItem('alert-d', {
+      type: 'RALENTISSEMENT',
+      description: 'Ralentissement Yaoundé',
+      latitude: 3.8667,
+      longitude: 11.5167,
+      createdAt: nowMs - 30 * 60 * 1000,
+      direction: 'Bafoussam',
+    });
+    const resD = filterRelevantAlerts([alertD], 4.7500, 11.2333, 'YAOUNDE_TO_BAFOUSSAM', NOW_TEST, 80);
+    results.push({
+      name: 'TEST D : Chauffeur Bafia, Alerte Yaoundé (BEHIND) -> GEOGRAPHICALLY_EXCLUDED',
+      passed: resD.relevantAlerts.length === 0 &&
+              resD.excludedAlerts.length === 1 &&
+              resD.excludedAlerts[0]?.geographicStatus === 'BEHIND' &&
+              resD.excludedAlerts[0]?.reason === 'GEOGRAPHICALLY_EXCLUDED',
+      details: `relevant: ${resD.relevantAlerts.length}, geoStatus: ${resD.excludedAlerts[0]?.geographicStatus}`,
+    });
+
+    // TEST E : Chauffeur à Douala (hors corridor), Alerte Ombessa -> DRIVER_OFF_CORRIDOR
+    const resE = filterRelevantAlerts([alertB], 4.05, 9.7, 'YAOUNDE_TO_BAFOUSSAM', NOW_TEST, 80);
+    results.push({
+      name: 'TEST E : Chauffeur à Douala (hors corridor) -> DRIVER_OFF_CORRIDOR',
+      passed: resE.relevantAlerts.length === 0 &&
+              resE.isDriverOnCorridor === false &&
+              resE.excludedAlerts[0]?.geographicStatus === 'DRIVER_OFF_CORRIDOR',
+      details: `relevant: ${resE.relevantAlerts.length}, isDriverOnCorridor: ${resE.isDriverOnCorridor}, geoStatus: ${resE.excludedAlerts[0]?.geographicStatus}`,
+    });
+
+    // TEST F : Alerte sans latitude/longitude -> aucune exception, GPS_UNAVAILABLE
+    const alertF = this.mapDocToAlertItem('alert-f', {
+      type: 'ZONE_DANGEREUSE',
+      description: 'Alerte textuelle historique',
+      createdAt: nowMs - 30 * 60 * 1000,
+      direction: 'Bafoussam',
+    });
+    let threwF = false;
+    let resF: any = null;
+    try {
+      resF = filterRelevantAlerts([alertF], 4.7500, 11.2333, 'YAOUNDE_TO_BAFOUSSAM', NOW_TEST, 80);
+    } catch {
+      threwF = true;
+    }
+    results.push({
+      name: 'TEST F : Alerte sans GPS -> aucune exception, excludedAlerts présent',
+      passed: !threwF &&
+              resF?.relevantAlerts.length === 0 &&
+              resF?.excludedAlerts.length === 1 &&
+              resF?.excludedAlerts[0]?.geographicStatus === 'GPS_UNAVAILABLE',
+      details: `exception: ${threwF}, relevant: ${resF?.relevantAlerts.length}, geoStatus: ${resF?.excludedAlerts[0]?.geographicStatus}`,
+    });
+
+    // TEST 8 : TEST D'INTÉGRATION AVEC mapDocToAlertItem()
+    const rawFirestoreDoc = {
+      id: 'doc-full-integration',
+      type: 'ACCIDENT',
+      description: 'Accident grave PK 145',
+      location: 'Ombessa Centre',
+      direction: 'Bafoussam',
+      route: 'Yaoundé-Bafoussam',
+      createdAt: nowMs - 25 * 60 * 1000,
+      status: 'CONFIRMED',
+      confirmationCount: 4,
+      createdBy: 'Chauffeur 102',
+      latitude: 4.6000,
+      longitude: 11.2500,
+      accuracy: 12,
+      estimatedPk: 145,
+      roadAxis: 'N4',
+    };
+    const mappedItem = this.mapDocToAlertItem(rawFirestoreDoc.id, rawFirestoreDoc);
+    const isIntegrityOk =
+      mappedItem.latitude === 4.6000 &&
+      mappedItem.longitude === 11.2500 &&
+      mappedItem.createdAt === rawFirestoreDoc.createdAt &&
+      (mappedItem as any).estimatedPk === 145 &&
+      (mappedItem as any).roadAxis === 'N4' &&
+      mappedItem.type === 'ACCIDENT' &&
+      mappedItem.confirmationCount === 4;
+
+    const resIntegration = filterRelevantAlerts([mappedItem], 4.7500, 11.2333, 'YAOUNDE_TO_BAFOUSSAM', NOW_TEST, 80);
+    const isIntegrationFilterOk =
+      resIntegration.relevantAlerts.length === 1 &&
+      resIntegration.relevantAlerts[0]?.alert.id === 'doc-full-integration' &&
+      resIntegration.relevantAlerts[0]?.alert.latitude === 4.6000 &&
+      resIntegration.relevantAlerts[0]?.alert.longitude === 11.2500 &&
+      resIntegration.relevantAlerts[0]?.relativePosition === 'AHEAD';
+
+    results.push({
+      name: 'TEST INTÉGRATION mapDocToAlertItem -> filterRelevantAlerts',
+      passed: isIntegrityOk && isIntegrationFilterOk,
+      details: `intégrité: ${isIntegrityOk}, filtrage moteur: ${isIntegrationFilterOk}`,
+    });
+
+    return results;
+  }
+
+  /**
+   * ÉTAPE 5A : Calcule localement les données corridor d'une alerte confirmée à partir de ses coordonnées GPS.
+   * Fonction pure sans effet de bord :
+   * - Si coordonnées valides et sur le corridor -> { estimatedPk: number, roadAxis: 'N4' }
+   * - Si hors corridor ou invalides -> {} (aucun estimatedPk inventé)
+   */
+  public computeAlertCorridorData(
+    latitude?: number,
+    longitude?: number
+  ): { estimatedPk?: number; roadAxis?: string } {
+    if (
+      typeof latitude !== 'number' ||
+      typeof longitude !== 'number' ||
+      isNaN(latitude) ||
+      isNaN(longitude)
+    ) {
+      return {};
+    }
+
+    try {
+      const corridorPos = corridorService.getAlertCorridorPosition(latitude, longitude);
+      if (
+        corridorPos &&
+        corridorPos.isValid &&
+        corridorPos.isOnCorridor &&
+        typeof corridorPos.estimatedPk === 'number'
+      ) {
+        return {
+          estimatedPk: corridorPos.estimatedPk,
+          roadAxis: 'N4',
+        };
+      }
+    } catch (err) {
+      console.warn('[AlertService] Erreur calcul position corridor alerte :', err);
+    }
+
+    return {};
+  }
+
+  /**
    * RÈGLE ABSOLUE :
    * Une alerte n'est enregistrée comme alerte confirmée QU'APRÈS la confirmation explicite du chauffeur (OUI).
    * Persiste l'alerte dans la collection Firestore 'alerts'.
@@ -267,11 +516,23 @@ export class FirebaseAlertService {
       confirmedBy: [currentDriver],
     };
 
-    if (typeof record.latitude === 'number' && typeof record.longitude === 'number') {
+    if (
+      typeof record.latitude === 'number' &&
+      typeof record.longitude === 'number' &&
+      !isNaN(record.latitude) &&
+      !isNaN(record.longitude)
+    ) {
       firestorePayload.latitude = record.latitude;
       firestorePayload.longitude = record.longitude;
-      if (typeof record.accuracy === 'number') {
+      if (typeof record.accuracy === 'number' && !isNaN(record.accuracy)) {
         firestorePayload.accuracy = record.accuracy;
+      }
+
+      // ÉTAPE 5A : Calcul local du PK de référence ROUTEGUARD de l'alerte confirmée
+      const corridorData = this.computeAlertCorridorData(record.latitude, record.longitude);
+      if (typeof corridorData.estimatedPk === 'number') {
+        firestorePayload.estimatedPk = corridorData.estimatedPk;
+        firestorePayload.roadAxis = corridorData.roadAxis || 'N4';
       }
     }
 
@@ -515,3 +776,48 @@ export async function runFirestoreDiagnostic(): Promise<DiagnosticResult> {
 // Export de l'instance sous les deux noms pour compatibilité complète
 export const alertService = FirebaseAlertService.getInstance();
 export const AlertService = FirebaseAlertService;
+
+/**
+ * Fonction pure exportée pour le calcul direct des métadonnées corridor d'une alerte (Étape 5A)
+ */
+export const computeAlertCorridorData = (
+  latitude?: number,
+  longitude?: number
+): { estimatedPk?: number; roadAxis?: string } => {
+  return alertService.computeAlertCorridorData(latitude, longitude);
+};
+
+/**
+ * Fonction exportée pour convertir un document Firestore en objet AlertItem (Étape 6A)
+ */
+export const mapDocToAlertItem = (id: string, data: any): AlertItem => {
+  return alertService.mapDocToAlertItem(id, data);
+};
+
+/**
+ * Fonction exportée pour récupérer et filtrer les alertes pertinentes pour un chauffeur (Étape 6A)
+ */
+export async function getRelevantAlertsForDriver(
+  driverLatitude: number,
+  driverLongitude: number,
+  direction: CorridorDirection,
+  now?: number | string | Date,
+  maxDistanceKm: number = DEFAULT_MAX_ALERT_DISTANCE_KM,
+  maxAgeMinutes: number = DEFAULT_MAX_ALERT_AGE_MINUTES
+): Promise<FilterRelevantAlertsResult<AlertItem>> {
+  return alertService.getRelevantAlertsForDriver(
+    driverLatitude,
+    driverLongitude,
+    direction,
+    now,
+    maxDistanceKm,
+    maxAgeMinutes
+  );
+}
+
+/**
+ * Fonction exportée pour l'auto-diagnostic local du branchement alertService -> corridorService (Étape 6A)
+ */
+export const runAlertServiceSelfCheck = (): { name: string; passed: boolean; details: string }[] => {
+  return alertService.runAlertServiceSelfCheck();
+};
