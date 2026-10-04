@@ -7,7 +7,7 @@ import { Header } from './components/Header';
 import { BottomNav } from './components/BottomNav';
 import { HomeScreen } from './components/screens/HomeScreen';
 import { ReportFlowScreen } from './components/screens/ReportFlowScreen';
-import { AlertsListScreen } from './components/screens/AlertsListScreen';
+import { AlertsScreen } from './components/screens/AlertsScreen';
 import { AlertDetailScreen } from './components/screens/AlertDetailScreen';
 import { ProfileScreen } from './components/screens/ProfileScreen';
 
@@ -145,8 +145,7 @@ export default function App() {
           )}
 
           {activeScreen === 'alertes' && (
-            <AlertsListScreen
-              alerts={alerts}
+            <AlertsScreen
               onSelectAlert={handleViewAlertDetail}
               isAudioMuted={isAudioMuted}
             />

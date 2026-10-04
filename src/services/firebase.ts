@@ -1,5 +1,5 @@
 import { initializeApp, getApps, getApp } from 'firebase/app';
-import { getFirestore, Firestore, doc, getDocFromServer } from 'firebase/firestore';
+import { getFirestore, initializeFirestore, Firestore, doc, getDocFromServer } from 'firebase/firestore';
 import { getAuth, Auth } from 'firebase/auth';
 import appletConfig from '../../firebase-applet-config.json';
 import { firebaseConfig as placeholderConfig } from './firebaseConfig';
@@ -12,9 +12,17 @@ export const app = getApps().length === 0 ? initializeApp(effectiveConfig) : get
 
 export const auth: Auth = getAuth(app);
 
-export const db: Firestore = effectiveConfig.firestoreDatabaseId
-  ? getFirestore(app, effectiveConfig.firestoreDatabaseId)
-  : getFirestore(app);
+export const db: Firestore = (() => {
+  try {
+    return initializeFirestore(app, {
+      experimentalAutoDetectLongPolling: true,
+    }, effectiveConfig.firestoreDatabaseId || undefined);
+  } catch {
+    return effectiveConfig.firestoreDatabaseId
+      ? getFirestore(app, effectiveConfig.firestoreDatabaseId)
+      : getFirestore(app);
+  }
+})();
 
 // Connection test as required by Firebase integration
 async function testConnection() {
