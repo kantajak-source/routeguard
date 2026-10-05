@@ -86,7 +86,7 @@ export interface AIInterpretation {
   alertType: AlertType;
 }
 
-export type ActiveScreen = 'accueil' | 'alertes' | 'signaler' | 'alerte_detail' | 'profil';
+export type ActiveScreen = 'accueil' | 'alertes' | 'signaler' | 'alerte_detail' | 'profil' | 'auth';
 
 export interface DriverProfile {
   name: string;

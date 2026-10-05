@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { User } from 'firebase/auth';
 import { ActiveScreen, AlertItem } from './types/routeguard';
 import { INITIAL_ALERTS } from './data/initialAlerts';
 import { alertService } from './services/alertService';
@@ -10,15 +11,18 @@ import { ReportFlowScreen } from './components/screens/ReportFlowScreen';
 import { AlertsScreen } from './components/screens/AlertsScreen';
 import { AlertDetailScreen } from './components/screens/AlertDetailScreen';
 import { ProfileScreen } from './components/screens/ProfileScreen';
+import { AuthScreen } from './components/screens/AuthScreen';
 
 export default function App() {
   const [activeScreen, setActiveScreen] = useState<ActiveScreen>('accueil');
   const [alerts, setAlerts] = useState<AlertItem[]>(INITIAL_ALERTS);
   const [selectedAlertId, setSelectedAlertId] = useState<string | null>(null);
+  const [detailReturnScreen, setDetailReturnScreen] = useState<ActiveScreen>('alertes');
   const [isAudioMuted, setIsAudioMuted] = useState<boolean>(false);
   const [isDeviceFrame, setIsDeviceFrame] = useState<boolean>(true);
   const [isInCriticalFlow, setIsInCriticalFlow] = useState<boolean>(false);
   const [activeDriver, setActiveDriver] = useState<string>(alertService.getActiveDriver());
+  const [currentUser, setCurrentUser] = useState<User | null>(authService.getCurrentUser());
 
   // Subscribe to real-time alerts from shared data service (Firestore-ready / Multi-tab channel)
   useEffect(() => {
@@ -33,7 +37,10 @@ export default function App() {
 
   // Listen to authentication state
   useEffect(() => {
-    const unsubscribeAuth = authService.onAuthChange(() => {});
+    const unsubscribeAuth = authService.onAuthChange((user) => {
+      setCurrentUser(user);
+    });
+
     return () => {
       unsubscribeAuth();
     };
@@ -76,8 +83,16 @@ export default function App() {
     setActiveScreen('accueil');
   };
 
-  // View specific alert detail
-  const handleViewAlertDetail = (alert: AlertItem) => {
+  // View specific alert detail with contextual return screen
+  const handleViewAlertDetail = (alert: AlertItem, returnScreen: ActiveScreen = 'alertes') => {
+    setDetailReturnScreen(returnScreen);
+    setSelectedAlertId(alert.id);
+    setActiveScreen('alerte_detail');
+  };
+
+  // View specific alert detail from driver contributions profile
+  const handleViewAlertDetailFromProfile = (alert: AlertItem) => {
+    setDetailReturnScreen('profil');
     setSelectedAlertId(alert.id);
     setActiveScreen('alerte_detail');
   };
@@ -85,6 +100,12 @@ export default function App() {
   // Confirm an existing alert (+1 chauffeur confirmation, prevented if already confirmed)
   const handleConfirmAlert = async (alertId: string) => {
     await alertService.confirmAlert(alertId, activeDriver);
+  };
+
+  // Handle user logout from profile or settings
+  const handleLogout = async () => {
+    await authService.logout();
+    setActiveScreen('auth');
   };
 
   return (
@@ -125,7 +146,7 @@ export default function App() {
             <HomeScreen
               alerts={alerts}
               onStartReport={handleStartReport}
-              onViewAlertDetail={handleViewAlertDetail}
+              onViewAlertDetail={(alert) => handleViewAlertDetail(alert, 'accueil')}
               onViewAllAlerts={() => handleNavigate('alertes')}
               isAudioMuted={isAudioMuted}
               activeDriver={activeDriver}
@@ -146,7 +167,7 @@ export default function App() {
 
           {activeScreen === 'alertes' && (
             <AlertsScreen
-              onSelectAlert={handleViewAlertDetail}
+              onSelectAlert={(alert) => handleViewAlertDetail(alert, 'alertes')}
               isAudioMuted={isAudioMuted}
             />
           )}
@@ -154,7 +175,7 @@ export default function App() {
           {activeScreen === 'alerte_detail' && selectedAlert && (
             <AlertDetailScreen
               alert={selectedAlert}
-              onBack={() => handleNavigate('alertes')}
+              onBack={() => handleNavigate(detailReturnScreen)}
               onConfirmAlert={handleConfirmAlert}
               isAudioMuted={isAudioMuted}
             />
@@ -164,6 +185,22 @@ export default function App() {
             <ProfileScreen 
               activeDriver={activeDriver}
               onToggleDriver={handleToggleDriver}
+              onLogout={handleLogout}
+              onNavigate={handleNavigate}
+              currentUser={currentUser}
+              alerts={alerts}
+              onSelectAlert={handleViewAlertDetailFromProfile}
+            />
+          )}
+
+          {activeScreen === 'auth' && (
+            <AuthScreen
+              onAuthenticated={() => {
+                setActiveScreen('profil');
+              }}
+              onContinueAsGuest={() => {
+                setActiveScreen('accueil');
+              }}
             />
           )}
         </main>

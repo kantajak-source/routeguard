@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { AlertItem } from '../../types/routeguard';
 import { voiceService } from '../../services/voiceService';
+import { authService } from '../../services/authService';
 import { ArrowLeft, Check, AlertTriangle, Play, Pause } from 'lucide-react';
 
 interface AlertDetailScreenProps {
@@ -16,6 +17,11 @@ export const AlertDetailScreen: React.FC<AlertDetailScreenProps> = ({
   onConfirmAlert,
   isAudioMuted,
 }) => {
+  // Détermination de propriété de l'alerte basée strictement sur l'UID Firebase réel
+  const isOwnAlert = Boolean(
+    alert.createdByUid && alert.createdByUid === authService.getCurrentUser()?.uid
+  );
+
   // Independent state 1: Audio playback
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
 
@@ -141,6 +147,14 @@ export const AlertDetailScreen: React.FC<AlertDetailScreenProps> = ({
           <span>🚨</span>
           <span>{alert.badgeText || alert.title}</span>
         </div>
+
+        {/* Badge contextuel discret : VOTRE SIGNALEMENT */}
+        {isOwnAlert && (
+          <div className="inline-flex items-center gap-1.5 bg-[#edf4ff] text-[#002541] border border-blue-200/90 px-3.5 py-1 rounded-full font-extrabold text-xs uppercase tracking-wide shadow-xs">
+            <span className="text-sm">🛡️</span>
+            <span>VOTRE SIGNALEMENT</span>
+          </div>
+        )}
 
         {/* Distance & Location */}
         <div className="flex flex-col items-center mt-1">
