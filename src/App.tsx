@@ -4,6 +4,7 @@ import { ActiveScreen, AlertItem } from './types/routeguard';
 import { INITIAL_ALERTS } from './data/initialAlerts';
 import { alertService } from './services/alertService';
 import { authService } from './services/authService';
+import { outboxSyncService } from './services/outboxSyncService';
 import { Header } from './components/Header';
 import { BottomNav } from './components/BottomNav';
 import { HomeScreen } from './components/screens/HomeScreen';
@@ -45,6 +46,39 @@ export default function App() {
       unsubscribeAuth();
     };
   }, []);
+
+  // Synchronisation automatique Outbox (J-1-2-4-B) : au démarrage et au retour du réseau
+  useEffect(() => {
+    // 1. Déclenchement au démarrage de l'application
+    if (typeof navigator === 'undefined' || navigator.onLine) {
+      outboxSyncService.syncPendingAlerts().catch((err) => {
+        console.warn('[OutboxSync] Synchronisation au démarrage :', err);
+      });
+    }
+
+    // 2. Déclenchement au retour du réseau via l'événement 'online'
+    const handleOnline = () => {
+      console.log('[OutboxSync] Événement "online" détecté : synchronisation automatique...');
+      outboxSyncService.syncPendingAlerts().catch((err) => {
+        console.warn('[OutboxSync] Synchronisation au retour réseau :', err);
+      });
+    };
+
+    window.addEventListener('online', handleOnline);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+    };
+  }, []);
+
+  // Synchronisation dès que la session Firebase utilisateur devient prête / active
+  useEffect(() => {
+    if (currentUser && (typeof navigator === 'undefined' || navigator.onLine)) {
+      outboxSyncService.syncPendingAlerts().catch((err) => {
+        console.warn('[OutboxSync] Synchronisation sur mise à jour de session :', err);
+      });
+    }
+  }, [currentUser]);
 
   // Derived selected alert guarantees 100% synchronization with the master alerts state
   const selectedAlert = alerts.find((a) => a.id === selectedAlertId) || null;

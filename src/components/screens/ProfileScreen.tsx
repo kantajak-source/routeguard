@@ -3,6 +3,8 @@ import { User } from 'firebase/auth';
 import { ActiveScreen, AlertItem } from '../../types/routeguard';
 import { alertService } from '../../services/alertService';
 import { authService } from '../../services/authService';
+import { outboxService } from '../../services/outboxService';
+import { outboxSyncService } from '../../services/outboxSyncService';
 import {
   Building,
   Bus,
@@ -19,7 +21,11 @@ import {
   User as UserIcon,
   Mail,
   ArrowRight,
-  ChevronRight
+  ChevronRight,
+  Radio,
+  AlertTriangle,
+  CheckCircle2,
+  Loader2
 } from 'lucide-react';
 
 interface ProfileScreenProps {
@@ -86,6 +92,61 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
   });
 
   const [showToast, setShowToast] = useState<string | null>(null);
+
+  // GESTION OUTBOX LOCALE (J-1-2-4-A)
+  const [outboxAlerts, setOutboxAlerts] = useState(() => outboxService.getAllOutboxAlerts());
+  const [isSyncingOutbox, setIsSyncingOutbox] = useState(false);
+  const [outboxFeedback, setOutboxFeedback] = useState<{
+    type: 'success' | 'network_error' | 'auth_mismatch' | 'error';
+    message: string;
+  } | null>(null);
+
+  const outboxCount = outboxAlerts.length;
+
+  const refreshOutboxState = () => {
+    const current = outboxService.getAllOutboxAlerts();
+    setOutboxAlerts(current);
+  };
+
+  const handleManualSyncOutbox = async () => {
+    if (isSyncingOutbox) return;
+    setIsSyncingOutbox(true);
+    setOutboxFeedback(null);
+
+    try {
+      const report = await outboxSyncService.syncPendingAlerts();
+      refreshOutboxState();
+
+      if (report.syncedCount > 0 || report.alreadySyncedCount > 0) {
+        const totalSynchronized = report.syncedCount + report.alreadySyncedCount;
+        setOutboxFeedback({
+          type: 'success',
+          message: `✓ Synchronisation terminée (${totalSynchronized} signalement${totalSynchronized > 1 ? 's' : ''})`,
+        });
+      } else if (report.skippedAuthMismatchCount > 0) {
+        setOutboxFeedback({
+          type: 'auth_mismatch',
+          message: '⚠️ Certains signalements ne peuvent pas encore être synchronisés.',
+        });
+      } else if (report.failedCount > 0) {
+        setOutboxFeedback({
+          type: 'network_error',
+          message: '⚠️ Synchronisation impossible pour le moment',
+        });
+      } else {
+        // Aucune alerte n'a pu être synchronisée (ex: Outbox vide)
+        setOutboxFeedback(null);
+      }
+    } catch {
+      refreshOutboxState();
+      setOutboxFeedback({
+        type: 'network_error',
+        message: '⚠️ Synchronisation impossible pour le moment',
+      });
+    } finally {
+      setIsSyncingOutbox(false);
+    }
+  };
 
   const toggleSetting = (key: 'notificationsEnabled' | 'autoAudioEnabled' | 'dataSaverEnabled') => {
     setPreferences(prev => {
@@ -217,6 +278,72 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
           </div>
         )}
       </section>
+
+      {/* SECTION SIGNALEMENTS EN ATTENTE (OUTBOX LOCALE - J-1-2-4-A) */}
+      {outboxCount > 0 && (
+        <section className="bg-amber-50/70 rounded-2xl p-4 shadow-sm border border-amber-200/90 flex flex-col gap-3">
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] font-black uppercase tracking-wider text-[#914d00] flex items-center gap-1.5">
+              <Radio className="w-4 h-4 text-[#fc9430]" />
+              Signalements en attente
+            </span>
+            <span className="text-[10px] font-extrabold bg-[#ffdcc3] text-[#914d00] px-2 py-0.5 rounded-full">
+              {outboxCount} {outboxCount > 1 ? 'locaux' : 'local'}
+            </span>
+          </div>
+
+          <div className="flex flex-col gap-1 text-xs">
+            <p className="font-bold text-[#002541]">
+              {outboxCount} signalement{outboxCount > 1 ? 's' : ''} conservé{outboxCount > 1 ? 's' : ''} localement
+            </p>
+            <p className="text-[11px] text-[#5a6573] leading-relaxed">
+              En attente de connexion réseau ou d'émission vers le corridor. Vous pouvez déclencher manuellement la synchronisation.
+            </p>
+          </div>
+
+          {/* Feedback messages */}
+          {outboxFeedback && (
+            <div className={`p-2.5 rounded-xl text-xs font-bold flex items-center gap-2 ${
+              outboxFeedback.type === 'success'
+                ? 'bg-emerald-100/80 text-emerald-800 border border-emerald-300'
+                : outboxFeedback.type === 'auth_mismatch'
+                ? 'bg-amber-100 text-amber-900 border border-amber-300'
+                : 'bg-red-50 text-[#d92d20] border border-red-200'
+            }`}>
+              {outboxFeedback.type === 'success' ? (
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+              ) : (
+                <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+              )}
+              <span>{outboxFeedback.message}</span>
+            </div>
+          )}
+
+          {/* Bouton de synchronisation manuelle */}
+          <button
+            type="button"
+            onClick={handleManualSyncOutbox}
+            disabled={isSyncingOutbox}
+            className={`w-full min-h-[44px] rounded-xl font-black text-xs uppercase tracking-wider flex items-center justify-center gap-2 transition-all shadow-sm ${
+              isSyncingOutbox
+                ? 'bg-slate-200 text-slate-500 cursor-not-allowed'
+                : 'bg-[#002541] hover:bg-[#003865] active:scale-98 text-white'
+            }`}
+          >
+            {isSyncingOutbox ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin text-[#fc9430]" />
+                <span>Synchronisation en cours…</span>
+              </>
+            ) : (
+              <>
+                <RefreshCw className="w-4 h-4 text-[#fc9430]" />
+                <span>Synchroniser</span>
+              </>
+            )}
+          </button>
+        </section>
+      )}
 
       {/* SECTION MES CONTRIBUTIONS N4 */}
       <section className="bg-white rounded-2xl p-4 shadow-sm border border-slate-200/80 flex flex-col gap-3">

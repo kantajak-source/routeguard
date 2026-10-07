@@ -4,8 +4,10 @@ import { voiceService } from '../../services/voiceService';
 import { AIInterpreter } from '../../services/aiInterpreter';
 import { alertService } from '../../services/alertService';
 import { locationService, LocationCoordinates } from '../../services/locationService';
+import { outboxService } from '../../services/outboxService';
+import { authService } from '../../services/authService';
 import { SAMPLE_VOICE_REPORTS } from '../../data/initialAlerts';
-import { Check, X, Mic, Volume2, ArrowLeft, RotateCcw, AlertTriangle } from 'lucide-react';
+import { Check, X, Mic, Volume2, ArrowLeft, RotateCcw, AlertTriangle, CloudOff } from 'lucide-react';
 
 interface ReportFlowScreenProps {
   onCancel: () => void;
@@ -28,6 +30,8 @@ export const ReportFlowScreen: React.FC<ReportFlowScreenProps> = ({
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [isListeningForVoiceChoice, setIsListeningForVoiceChoice] = useState<boolean>(false);
   const [publishedAlert, setPublishedAlert] = useState<AlertItem | null>(null);
+  const [isSavedLocally, setIsSavedLocally] = useState<boolean>(false);
+  const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
 
   // References to stop active audio or speech instances
   const activeListenerRef = useRef<{ stop: () => void } | null>(null);
@@ -51,6 +55,8 @@ export const ReportFlowScreen: React.FC<ReportFlowScreenProps> = ({
   // STEP 1 -> STEP 2: START RECORDING (PARLER)
   // ----------------------------------------------------
   const handleStartRecording = (presetPhrase?: string) => {
+    setIsSavedLocally(false);
+    setIsSubmitting(false);
     voiceService.playRadioBeep('start');
     setStep('RECORDING');
     setRecordingSeconds(0);
@@ -95,19 +101,16 @@ export const ReportFlowScreen: React.FC<ReportFlowScreenProps> = ({
           }
         },
         (err) => {
-          console.warn('Speech recognition fallback used:', err);
-          // Default fallback sentence if driver spoke nothing
-          if (!spokenText) {
-            setSpokenText('Véhicule immobilisé près de Bafia direction Bafoussam');
-          }
+          console.warn('Speech recognition error:', err);
+          // Ne jamais injecter de fausse phrase si le chauffeur n'a rien dit
         },
         () => {
           // On end
         }
       );
-    } catch {
-      // Fallback preset
-      setSpokenText('Véhicule immobilisé près de Bafia direction Bafoussam');
+    } catch (err) {
+      console.warn('Speech recognition start failed:', err);
+      // Ne jamais injecter de fausse phrase si la reconnaissance vocale échoue
     }
   };
 
@@ -119,7 +122,22 @@ export const ReportFlowScreen: React.FC<ReportFlowScreenProps> = ({
     if (timerRef.current) clearInterval(timerRef.current);
     activeListenerRef.current?.stop();
 
-    const finalText = textOverride || spokenText || 'Véhicule immobilisé près de Bafia direction Bafoussam';
+    const finalText = (textOverride || spokenText || '').trim();
+
+    // RÈGLE DE SÉCURITÉ : ABSENCE DE TRANSCRIPTION ≠ VÉHICULE IMMOBILISÉ
+    // Si aucun texte réel n'est capté, interdire le passage à Gemini et demander de recommencer
+    if (!finalText) {
+      pendingCoordsRef.current = null;
+      setSpokenText('');
+      setInterpretation(null);
+      setAnalysisError("Aucune voix détectée. Veuillez appuyer sur le micro et parler pour décrire le danger.");
+      setStep('READY');
+      if (!isAudioMuted) {
+        voiceService.speakText("Je n'ai rien entendu. Veuillez appuyer sur Parler et recommencer.");
+      }
+      return;
+    }
+
     setSpokenText(finalText);
     setAnalysisError(null);
     setInterpretation(null);
@@ -204,15 +222,21 @@ export const ReportFlowScreen: React.FC<ReportFlowScreenProps> = ({
 
   // ----------------------------------------------------
   // STEP 4 -> STEP 5: DRIVER SAID "OUI" -> SEND ALERT
-  // Enregistrement effectif dans la source de données partagée
+  // Enregistrement effectif dans Firestore ou sauvegarde dans l'Outbox locale en cas d'échec
   // ----------------------------------------------------
   const handleConfirmAndSend = async () => {
+    if (isSubmitting) return;
+    setIsSubmitting(true);
+
     activeListenerRef.current?.stop();
     activeSpeakerRef.current?.stop();
     voiceService.stopSpeaking();
     voiceService.playRadioBeep('success');
 
-    if (!interpretation) return;
+    if (!interpretation) {
+      setIsSubmitting(false);
+      return;
+    }
 
     // Persist via AlertService (shared collection "alerts")
     const cleanDescription = interpretation.summaryText.replace(/[«»]/g, '').trim();
@@ -222,32 +246,118 @@ export const ReportFlowScreen: React.FC<ReportFlowScreenProps> = ({
     const capturedCoords = pendingCoordsRef.current;
     pendingCoordsRef.current = null;
 
-    const createdAlert = await alertService.createAndPublishAlert({
-      type: interpretation.alertType,
-      description: cleanDescription,
-      location: interpretation.sector,
-      direction: cleanDirection,
-      route: 'Yaoundé-Bafoussam',
-      audioDuration: '0:12',
-      audioTranscript: `Alerte confirmée par ${alertService.getActiveDriver()} : ${interpretation.summaryText}`,
-      severity: interpretation.suggestedSeverity,
-      latitude: capturedCoords?.latitude,
-      longitude: capturedCoords?.longitude,
-      accuracy: capturedCoords?.accuracy,
-    });
+    const activeDriverName = alertService.getActiveDriver();
 
-    setPublishedAlert(createdAlert);
-    onAlertPublished(createdAlert);
-    setStep('SENT');
+    // J-1-2-3-A0 : Récupération du véritable Firebase UID du chauffeur au moment de la confirmation
+    let currentDriverUid = authService.getCurrentUserId();
+    if (!currentDriverUid) {
+      try {
+        const authUser = await authService.ensureAnonymousSession();
+        currentDriverUid = authUser?.uid || null;
+      } catch {
+        currentDriverUid = null;
+      }
+    }
 
-    if (!isAudioMuted) {
-      voiceService.speakText("Alerte envoyée aux chauffeurs de l'axe N4.");
+    try {
+      // Si le navigateur est explicitement hors-ligne, basculer directement sur l'Outbox locale
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        throw new Error('Connexion réseau indisponible (navigator.onLine = false)');
+      }
+
+      const createdAlert = await alertService.createAndPublishAlert({
+        type: interpretation.alertType,
+        description: cleanDescription,
+        location: interpretation.sector,
+        direction: cleanDirection,
+        route: 'Yaoundé-Bafoussam',
+        audioDuration: '0:12',
+        audioTranscript: `Alerte confirmée par ${activeDriverName} : ${interpretation.summaryText}`,
+        severity: interpretation.suggestedSeverity,
+        latitude: capturedCoords?.latitude,
+        longitude: capturedCoords?.longitude,
+        accuracy: capturedCoords?.accuracy,
+      });
+
+      setIsSavedLocally(false);
+      setPublishedAlert(createdAlert);
+      onAlertPublished(createdAlert);
+      setStep('SENT');
+
+      if (!isAudioMuted) {
+        voiceService.speakText("Alerte envoyée aux chauffeurs de l'axe N4.");
+      }
+    } catch (publishError: any) {
+      console.warn('[ROUTEGUARD] Échec envoi distant, bascule Outbox locale :', publishError);
+
+      // SAUVEGARDE LOCALE RÉSILIENTE DANS L'OUTBOX (routeguard.outbox.v1)
+      // RÈGLE ABSOLUE : Déclenché uniquement après confirmation explicite "OUI" du chauffeur
+      // J-1-2-3-A0 : Conserver le véritable Firebase UID du chauffeur (createdByUid)
+      const queuedAlert = outboxService.enqueueAlert({
+        type: interpretation.alertType,
+        description: cleanDescription,
+        location: interpretation.sector,
+        direction: cleanDirection,
+        route: 'Yaoundé-Bafoussam',
+        audioDuration: '0:12',
+        audioTranscript: `Alerte confirmée par ${activeDriverName} : ${interpretation.summaryText}`,
+        severity: interpretation.suggestedSeverity,
+        latitude: capturedCoords?.latitude,
+        longitude: capturedCoords?.longitude,
+        accuracy: capturedCoords?.accuracy,
+        createdBy: activeDriverName,
+        createdByUid: currentDriverUid || undefined,
+        confirmedByUids: currentDriverUid ? [currentDriverUid] : [],
+        timestamp: Date.now(),
+      });
+
+      // Construction de l'alerte locale pour l'affichage immédiat dans l'UI du chauffeur
+      const localAlert: AlertItem = {
+        id: queuedAlert.localId,
+        type: interpretation.alertType,
+        severity: interpretation.suggestedSeverity,
+        title: interpretation.dangerType,
+        badgeText: interpretation.suggestedSeverity,
+        description: cleanDescription,
+        location: interpretation.sector,
+        route: 'Yaoundé-Bafoussam',
+        distanceText: 'Position actuelle',
+        sector: interpretation.sector,
+        direction: cleanDirection,
+        audioDuration: '0:12',
+        audioTranscript: `Alerte confirmée par ${activeDriverName} : ${interpretation.summaryText}`,
+        confirmationsCount: 1,
+        confirmationCount: 1,
+        confirmedBy: [activeDriverName],
+        confirmedByUids: currentDriverUid ? [currentDriverUid] : [],
+        createdBy: activeDriverName,
+        createdByUid: currentDriverUid || undefined,
+        timeAgo: "À l'instant",
+        createdAt: Date.now(),
+        isUserCreated: true,
+        userConfirmed: true,
+        status: 'CONFIRMED',
+        latitude: capturedCoords?.latitude,
+        longitude: capturedCoords?.longitude,
+        accuracy: capturedCoords?.accuracy,
+      };
+
+      setIsSavedLocally(true);
+      setPublishedAlert(localAlert);
+      onAlertPublished(localAlert);
+      setStep('SENT');
+
+      if (!isAudioMuted) {
+        voiceService.speakText("Alerte enregistrée en attente de réseau. Elle sera transmise dès le retour de la connexion.");
+      }
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
   // ----------------------------------------------------
   // STEP 4 -> STEP 1: DRIVER SAID "NON" -> RESTART
-  // RÈGLE : Ne rien enregistrer dans la source de données
+  // RÈGLE : Ne rien enregistrer dans la source de données ni dans l'Outbox
   // ----------------------------------------------------
   const handleRejectAndRestart = () => {
     activeListenerRef.current?.stop();
@@ -257,6 +367,10 @@ export const ReportFlowScreen: React.FC<ReportFlowScreenProps> = ({
 
     // Annuler et effacer la coordonnée GPS en attente
     pendingCoordsRef.current = null;
+
+    // Réinitialiser les états
+    setIsSavedLocally(false);
+    setIsSubmitting(false);
 
     // Return to speaking state as required: CONFIRMATION -> NON -> PARLER À NOUVEAU
     setSpokenText('');
@@ -309,6 +423,14 @@ export const ReportFlowScreen: React.FC<ReportFlowScreenProps> = ({
             <p className="text-xs text-[#5a6573] max-w-[280px]">
               Ne touchez à aucun menu. Appuyez sur le micro et décrivez ce que vous voyez sur la route.
             </p>
+            {analysisError && (
+              <div className="mt-2 bg-amber-50 border border-amber-300 rounded-xl p-2.5 max-w-[320px] flex items-center gap-2 text-left">
+                <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0" />
+                <span className="text-xs font-bold text-amber-900 leading-snug">
+                  {analysisError}
+                </span>
+              </div>
+            )}
           </div>
 
           {/* GROS BOUTON MICROPHONE : 🎙️ PARLER */}
@@ -608,16 +730,21 @@ export const ReportFlowScreen: React.FC<ReportFlowScreenProps> = ({
               {/* BOUTON OUI : Confirmer et envoyer l'alerte */}
               <button
                 onClick={handleConfirmAndSend}
+                disabled={isSubmitting}
                 type="button"
-                className="min-h-[72px] bg-[#2e7d32] hover:bg-emerald-700 active:scale-95 text-white border-2 border-emerald-500 rounded-2xl flex flex-col items-center justify-center p-2 shadow-lg transition-all"
+                className={`min-h-[72px] ${
+                  isSubmitting ? 'bg-emerald-800 opacity-80 cursor-wait' : 'bg-[#2e7d32] hover:bg-emerald-700 active:scale-95'
+                } text-white border-2 border-emerald-500 rounded-2xl flex flex-col items-center justify-center p-2 shadow-lg transition-all`}
                 aria-label="Oui, envoyer cette alerte"
               >
                 <div className="flex items-center gap-1.5 text-white">
                   <Check className="w-6 h-6 stroke-[3]" />
-                  <span className="font-black text-[22px] tracking-wider">OUI</span>
+                  <span className="font-black text-[22px] tracking-wider">
+                    {isSubmitting ? 'ENVOI...' : 'OUI'}
+                  </span>
                 </div>
                 <span className="text-[11px] font-extrabold text-emerald-100 uppercase tracking-wide">
-                  Envoyer l'alerte
+                  {isSubmitting ? 'Transmission...' : "Envoyer l'alerte"}
                 </span>
               </button>
             </div>
@@ -630,22 +757,47 @@ export const ReportFlowScreen: React.FC<ReportFlowScreenProps> = ({
       )}
 
       {/* ============================================================ */}
-      {/* ÉCRAN 5 : ALERTE ENVOYÉE                                     */}
+      {/* ÉCRAN 5 : ALERTE ENVOYÉE / ENREGISTRÉE DANS L'OUTBOX         */}
       {/* ============================================================ */}
       {step === 'SENT' && publishedAlert && (
         <div className="flex flex-col items-center justify-between flex-1 py-6 text-center">
           <div className="flex flex-col items-center gap-3">
-            {/* Green Checkmark */}
-            <div className="w-20 h-20 rounded-full bg-emerald-100 border-4 border-emerald-500 text-[#2e7d32] flex items-center justify-center shadow-lg animate-bounce">
-              <Check className="w-10 h-10 stroke-[3]" />
+            {/* Green Checkmark or Amber CloudOff for Outbox */}
+            <div
+              className={`w-20 h-20 rounded-full ${
+                isSavedLocally
+                  ? 'bg-amber-100 border-4 border-amber-500 text-amber-700'
+                  : 'bg-emerald-100 border-4 border-emerald-500 text-[#2e7d32]'
+              } flex items-center justify-center shadow-lg animate-bounce`}
+            >
+              {isSavedLocally ? (
+                <CloudOff className="w-10 h-10 stroke-[2.5]" />
+              ) : (
+                <Check className="w-10 h-10 stroke-[3]" />
+              )}
             </div>
 
-            <h1 className="font-black text-[28px] text-[#2e7d32] uppercase tracking-tight mt-2">
-              ✓ ALERTE ENVOYÉE
-            </h1>
+            <div className="flex flex-col items-center gap-1 mt-2">
+              <h1
+                className={`font-black text-[26px] ${
+                  isSavedLocally ? 'text-amber-800' : 'text-[#2e7d32]'
+                } uppercase tracking-tight`}
+              >
+                {isSavedLocally ? '✓ ENREGISTRÉE EN OUTBOX' : '✓ ALERTE ENVOYÉE'}
+              </h1>
+              {isSavedLocally && (
+                <span className="text-[11px] font-extrabold uppercase tracking-wide bg-amber-100 text-amber-900 border border-amber-300 px-3 py-1 rounded-full">
+                  Stockage local sécurisé (hors-ligne)
+                </span>
+              )}
+            </div>
 
             {/* Summary card */}
-            <div className="w-full max-w-[320px] bg-white rounded-2xl border-2 border-emerald-200 p-4 shadow-md flex flex-col gap-2 text-center mt-2">
+            <div
+              className={`w-full max-w-[320px] bg-white rounded-2xl border-2 ${
+                isSavedLocally ? 'border-amber-300' : 'border-emerald-200'
+              } p-4 shadow-md flex flex-col gap-2 text-center mt-2`}
+            >
               <span className="font-black text-[22px] text-[#002541] uppercase">
                 {publishedAlert.title}
               </span>
@@ -654,7 +806,9 @@ export const ReportFlowScreen: React.FC<ReportFlowScreenProps> = ({
                 <span>{publishedAlert.direction}</span>
               </div>
               <div className="text-[12px] text-[#5a6573] border-t border-slate-100 pt-2 font-medium">
-                Transmise instantanément aux bus du Corridor N4
+                {isSavedLocally
+                  ? 'Signalement conservé localement dans l’Outbox. Il sera automatiquement transmis dès le rétablissement de la connexion.'
+                  : 'Transmise instantanément aux bus du Corridor N4'}
               </div>
             </div>
           </div>
