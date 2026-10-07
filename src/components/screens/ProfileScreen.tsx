@@ -62,12 +62,21 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
 
   const myConfirmations = useMemo(() => {
     if (!currentUid || !alerts) return [];
-    return alerts.filter(a => a.confirmedByUids && a.confirmedByUids.includes(currentUid));
+    return alerts.filter(
+      a => a.createdByUid !== currentUid && Boolean(a.confirmedByUids && a.confirmedByUids.includes(currentUid))
+    );
   }, [alerts, currentUid]);
 
   const recentMyReports = useMemo(() => {
     return myReports.slice(0, 5);
   }, [myReports]);
+
+  const recentMyConfirmations = useMemo(() => {
+    return myConfirmations.slice(0, 5);
+  }, [myConfirmations]);
+
+  // État local de la double vue : 'myReports' (Mes signalements) ou 'myConfirmations' (Mes confirmations)
+  const [activeContributionTab, setActiveContributionTab] = useState<'myReports' | 'myConfirmations'>('myReports');
 
   // Préférences de conduite locales
   const [preferences, setPreferences] = useState({
@@ -220,9 +229,17 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
           </span>
         </div>
 
-        {/* 2 Compteurs factuels */}
+        {/* 2 Compteurs factuels et interactifs */}
         <div className="grid grid-cols-2 gap-2.5">
-          <div className="flex flex-col p-3 rounded-xl bg-[#edf4ff] border border-blue-100/80">
+          <button
+            type="button"
+            onClick={() => setActiveContributionTab('myReports')}
+            className={`flex flex-col p-3 rounded-xl text-left transition-all ${
+              activeContributionTab === 'myReports'
+                ? 'bg-[#edf4ff] border-2 border-blue-400/80 shadow-xs'
+                : 'bg-slate-50 border border-slate-200 hover:bg-slate-100'
+            }`}
+          >
             <span className="text-[10px] font-extrabold uppercase tracking-wide text-[#5a6573]">
               Signalements
             </span>
@@ -232,9 +249,17 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
             <span className="text-[10px] text-[#5a6573] font-medium mt-0.5">
               Dangers partagés
             </span>
-          </div>
+          </button>
 
-          <div className="flex flex-col p-3 rounded-xl bg-[#edf4ff] border border-blue-100/80">
+          <button
+            type="button"
+            onClick={() => setActiveContributionTab('myConfirmations')}
+            className={`flex flex-col p-3 rounded-xl text-left transition-all ${
+              activeContributionTab === 'myConfirmations'
+                ? 'bg-emerald-50/70 border-2 border-emerald-400/80 shadow-xs'
+                : 'bg-slate-50 border border-slate-200 hover:bg-slate-100'
+            }`}
+          >
             <span className="text-[10px] font-extrabold uppercase tracking-wide text-[#5a6573]">
               Confirmations
             </span>
@@ -244,74 +269,204 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
             <span className="text-[10px] text-[#5a6573] font-medium mt-0.5">
               Alertes confirmées
             </span>
+          </button>
+        </div>
+
+        {/* Sélecteur tactile d'onglets */}
+        <div className="grid grid-cols-2 p-1 bg-slate-100 rounded-xl gap-1">
+          <button
+            type="button"
+            onClick={() => setActiveContributionTab('myReports')}
+            className={`flex items-center justify-between px-3 py-2.5 rounded-lg text-xs font-black transition-all ${
+              activeContributionTab === 'myReports'
+                ? 'bg-white text-[#002541] shadow-xs border border-slate-200/90'
+                : 'text-slate-600 hover:text-[#002541]'
+            }`}
+          >
+            <span className="flex items-center gap-1.5 truncate">
+              <span>🚨</span>
+              <span className="truncate">Mes signalements</span>
+            </span>
+            <span className={`px-2 py-0.5 rounded-full text-[10px] font-black ${
+              activeContributionTab === 'myReports'
+                ? 'bg-[#edf4ff] text-[#002541] border border-blue-200'
+                : 'bg-slate-200 text-slate-700'
+            }`}>
+              {myReports.length}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveContributionTab('myConfirmations')}
+            className={`flex items-center justify-between px-3 py-2.5 rounded-lg text-xs font-black transition-all ${
+              activeContributionTab === 'myConfirmations'
+                ? 'bg-white text-emerald-800 shadow-xs border border-emerald-200/90'
+                : 'text-slate-600 hover:text-[#002541]'
+            }`}
+          >
+            <span className="flex items-center gap-1.5 truncate">
+              <span>✓</span>
+              <span className="truncate">Mes confirmations</span>
+            </span>
+            <span className={`px-2 py-0.5 rounded-full text-[10px] font-black ${
+              activeContributionTab === 'myConfirmations'
+                ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                : 'bg-slate-200 text-slate-700'
+            }`}>
+              {myConfirmations.length}
+            </span>
+          </button>
+        </div>
+
+        {/* CONTENU DE LA VUE ACTIVE */}
+        {activeContributionTab === 'myReports' ? (
+          <div className="flex flex-col gap-2 pt-0.5">
+            <span className="text-[11px] font-bold text-[#002541]">
+              Mes derniers signalements
+            </span>
+
+            {recentMyReports.length === 0 ? (
+              <div className="p-3.5 rounded-xl bg-slate-50 border border-dashed border-slate-200 text-center flex flex-col items-center gap-1">
+                <span className="text-sm">📢</span>
+                <span className="text-xs font-bold text-[#002541]">Aucun signalement pour le moment</span>
+                <span className="text-[10px] text-slate-500">
+                  Vos signalements validés apparaîtront ici.
+                </span>
+              </div>
+            ) : (
+              <div className="flex flex-col gap-2">
+                {recentMyReports.map((alert) => {
+                  const confCount = alert.confirmationCount || alert.confirmationsCount || 1;
+                  const isCommunityConfirmed = confCount > 1;
+
+                  return (
+                    <div
+                      key={alert.id}
+                      onClick={() => onSelectAlert?.(alert)}
+                      role="button"
+                      tabIndex={0}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          onSelectAlert?.(alert);
+                        }
+                      }}
+                      className="p-2.5 rounded-xl bg-slate-50 hover:bg-slate-100 active:bg-slate-200/80 border border-slate-200/80 flex items-center justify-between gap-2 cursor-pointer transition-all duration-150 active:scale-[0.99] select-none text-left"
+                      aria-label={`Voir le détail du signalement ${alert.title || alert.type}`}
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <div className="w-8 h-8 rounded-lg bg-white border border-slate-200 flex items-center justify-center shrink-0">
+                          {alert.type === 'ACCIDENT' && <span className="text-sm">🚨</span>}
+                          {alert.type === 'VEHICULE_IMMOBILISE' && <span className="text-sm">🚧</span>}
+                          {alert.type === 'FORTE_PLUIE' && <span className="text-sm">🌧️</span>}
+                          {alert.type === 'OBSTACLE' && <span className="text-sm">⚠️</span>}
+                          {alert.type === 'RALENTISSEMENT' && <span className="text-sm">🛑</span>}
+                        </div>
+                        <div className="flex flex-col min-w-0">
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-xs font-bold text-[#002541] truncate">
+                              {alert.title || alert.type.replace('_', ' ')}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-1.5 text-[10px] text-slate-500 font-medium">
+                            <span className="truncate">{alert.location || alert.sector || 'Corridor N4'}</span>
+                            <span>•</span>
+                            <span className="shrink-0">{alert.timeAgo}</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {isCommunityConfirmed ? (
+                          <div className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 text-[10px] font-extrabold">
+                            <span>✓</span>
+                            <span>Validé par la communauté · {confCount} conf.</span>
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-amber-800 text-[10px] font-extrabold">
+                            <span>⏳</span>
+                            <span>En attente de validation</span>
+                          </div>
+                        )}
+                        <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
-        </div>
+        ) : (
+          <div className="flex flex-col gap-2 pt-0.5">
+            <span className="text-[11px] font-bold text-[#002541]">
+              Mes alertes confirmées
+            </span>
 
-        {/* Liste Mes derniers signalements */}
-        <div className="flex flex-col gap-2 pt-1">
-          <span className="text-[11px] font-bold text-[#002541]">
-            Mes derniers signalements
-          </span>
+            {recentMyConfirmations.length === 0 ? (
+              <div className="p-3.5 rounded-xl bg-slate-50 border border-dashed border-slate-200 text-center flex flex-col items-center gap-1">
+                <span className="text-sm">✓</span>
+                <span className="text-xs font-bold text-[#002541]">Aucune confirmation pour le moment</span>
+                <span className="text-[10px] text-slate-500">
+                  Vous n'avez encore confirmé aucune alerte de confrère.
+                </span>
+              </div>
+            ) : (
+              <div className="flex flex-col gap-2">
+                {recentMyConfirmations.map((alert) => {
+                  const confCount = alert.confirmationCount || alert.confirmationsCount || 1;
 
-          {recentMyReports.length === 0 ? (
-            <div className="p-3.5 rounded-xl bg-slate-50 border border-dashed border-slate-200 text-center flex flex-col items-center gap-1">
-              <span className="text-sm">📢</span>
-              <span className="text-xs font-bold text-[#002541]">Aucun signalement pour le moment</span>
-              <span className="text-[10px] text-slate-500">
-                Vos signalements validés apparaîtront ici.
-              </span>
-            </div>
-          ) : (
-            <div className="flex flex-col gap-2">
-              {recentMyReports.map((alert) => (
-                <div
-                  key={alert.id}
-                  onClick={() => onSelectAlert?.(alert)}
-                  role="button"
-                  tabIndex={0}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') {
-                      e.preventDefault();
-                      onSelectAlert?.(alert);
-                    }
-                  }}
-                  className="p-2.5 rounded-xl bg-slate-50 hover:bg-slate-100 active:bg-slate-200/80 border border-slate-200/80 flex items-center justify-between gap-2 cursor-pointer transition-all duration-150 active:scale-[0.99] select-none text-left"
-                  aria-label={`Voir le détail du signalement ${alert.title || alert.type}`}
-                >
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <div className="w-8 h-8 rounded-lg bg-white border border-slate-200 flex items-center justify-center shrink-0">
-                      {alert.type === 'ACCIDENT' && <span className="text-sm">🚨</span>}
-                      {alert.type === 'VEHICULE_IMMOBILISE' && <span className="text-sm">🚧</span>}
-                      {alert.type === 'FORTE_PLUIE' && <span className="text-sm">🌧️</span>}
-                      {alert.type === 'OBSTACLE' && <span className="text-sm">⚠️</span>}
-                      {alert.type === 'RALENTISSEMENT' && <span className="text-sm">🛑</span>}
-                    </div>
-                    <div className="flex flex-col min-w-0">
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-xs font-bold text-[#002541] truncate">
-                          {alert.title || alert.type.replace('_', ' ')}
-                        </span>
+                  return (
+                    <div
+                      key={alert.id}
+                      onClick={() => onSelectAlert?.(alert)}
+                      role="button"
+                      tabIndex={0}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          onSelectAlert?.(alert);
+                        }
+                      }}
+                      className="p-2.5 rounded-xl bg-slate-50 hover:bg-slate-100 active:bg-slate-200/80 border border-slate-200/80 flex items-center justify-between gap-2 cursor-pointer transition-all duration-150 active:scale-[0.99] select-none text-left"
+                      aria-label={`Voir le détail de l'alerte confirmée ${alert.title || alert.type}`}
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <div className="w-8 h-8 rounded-lg bg-white border border-slate-200 flex items-center justify-center shrink-0">
+                          {alert.type === 'ACCIDENT' && <span className="text-sm">🚨</span>}
+                          {alert.type === 'VEHICULE_IMMOBILISE' && <span className="text-sm">🚧</span>}
+                          {alert.type === 'FORTE_PLUIE' && <span className="text-sm">🌧️</span>}
+                          {alert.type === 'OBSTACLE' && <span className="text-sm">⚠️</span>}
+                          {alert.type === 'RALENTISSEMENT' && <span className="text-sm">🛑</span>}
+                        </div>
+                        <div className="flex flex-col min-w-0">
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-xs font-bold text-[#002541] truncate">
+                              {alert.title || alert.type.replace('_', ' ')}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-1.5 text-[10px] text-slate-500 font-medium">
+                            <span className="truncate">{alert.location || alert.sector || 'Corridor N4'}</span>
+                            <span>•</span>
+                            <span className="shrink-0">{alert.timeAgo}</span>
+                          </div>
+                        </div>
                       </div>
-                      <div className="flex items-center gap-1.5 text-[10px] text-slate-500 font-medium">
-                        <span className="truncate">{alert.location || alert.sector || 'Corridor N4'}</span>
-                        <span>•</span>
-                        <span className="shrink-0">{alert.timeAgo}</span>
+
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <div className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 text-[10px] font-extrabold">
+                          <span>✓</span>
+                          <span>{confCount} conf.</span>
+                        </div>
+                        <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
                       </div>
                     </div>
-                  </div>
-
-                  <div className="flex items-center gap-1.5 shrink-0">
-                    <div className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 text-[10px] font-extrabold">
-                      <span>✓</span>
-                      <span>{(alert.confirmationCount || alert.confirmationsCount || 1)} conf.</span>
-                    </div>
-                    <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
       </section>
 
       {/* CONTEXTE DE CONDUITE */}

@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { AlertItem, CorridorDirection } from '../../types/routeguard';
 import { voiceService } from '../../services/voiceService';
-import { locationService } from '../../services/locationService';
-import { corridorService, CorridorPositionResult } from '../../services/corridorService';
+import { locationService, LocationCoordinates } from '../../services/locationService';
+import { corridorService, CorridorPositionResult, RelevantAlertItem } from '../../services/corridorService';
+import { getRelevantAlertsForDriver } from '../../services/alertService';
 import { Volume2, VolumeX } from 'lucide-react';
 
 interface HomeScreenProps {
@@ -12,6 +13,9 @@ interface HomeScreenProps {
   onViewAllAlerts: () => void;
   isAudioMuted: boolean;
   activeDriver?: string;
+  overrideCoordinates?: LocationCoordinates | null;
+  overrideDirection?: CorridorDirection;
+  overrideNow?: number | string | Date;
 }
 
 export const HomeScreen: React.FC<HomeScreenProps> = ({
@@ -21,15 +25,16 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   onViewAllAlerts,
   isAudioMuted,
   activeDriver = 'Chauffeur A (Jean)',
+  overrideCoordinates,
+  overrideDirection,
+  overrideNow,
 }) => {
   const [isPlayingAudio, setIsPlayingAudio] = useState(false);
-  const primaryAlert = alerts[0] || null;
-  const secondaryAlertsCount = Math.max(0, alerts.length - 1);
-  const secondaryAlert = alerts[1] || null;
   const driverDisplayName = activeDriver.includes('Jean') || activeDriver.includes('A') ? 'Jean' : 'Paul';
 
   // État local du sens de circulation du chauffeur (mémorisé dans localStorage)
   const [direction, setDirection] = useState<CorridorDirection>(() => {
+    if (overrideDirection) return overrideDirection;
     if (typeof window !== 'undefined' && window.localStorage) {
       const saved = localStorage.getItem('routeguard.direction');
       if (saved === 'YAOUNDE_TO_BAFOUSSAM' || saved === 'BAFOUSSAM_TO_YAOUNDE') {
@@ -52,8 +57,10 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
 
   // État local de la position ponctuelle sur le corridor (en mémoire vive uniquement)
   const [corridorPosition, setCorridorPosition] = useState<CorridorPositionResult | null>(null);
+  const [driverCoords, setDriverCoords] = useState<LocationCoordinates | null>(null);
   const [isLocating, setIsLocating] = useState<boolean>(true);
   const [locationFailed, setLocationFailed] = useState<boolean>(false);
+  const [relevantAlertItems, setRelevantAlertItems] = useState<RelevantAlertItem<AlertItem>[]>([]);
 
   // Lecture GPS ponctuelle UNIQUE au chargement de l'écran (zéro suivi continu, zéro watchPosition)
   useEffect(() => {
@@ -63,22 +70,36 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
       try {
         setIsLocating(true);
         // Lecture ponctuelle non-bloquante avec timeout de 5s
-        const coords = await locationService.getCurrentLocation(5000);
+        const coords = overrideCoordinates !== undefined
+          ? overrideCoordinates
+          : await locationService.getCurrentLocation(5000);
+
         if (!isMounted) return;
 
-        if (coords) {
+        if (
+          coords &&
+          typeof coords.latitude === 'number' &&
+          typeof coords.longitude === 'number' &&
+          !isNaN(coords.latitude) &&
+          !isNaN(coords.longitude)
+        ) {
           const result = corridorService.getCorridorPosition(coords.latitude, coords.longitude);
           setCorridorPosition(result);
+          setDriverCoords(coords);
           setLocationFailed(false);
         } else {
           setCorridorPosition(null);
+          setDriverCoords(null);
           setLocationFailed(true);
+          setRelevantAlertItems([]);
         }
       } catch (err) {
         if (!isMounted) return;
         console.warn('[HomeScreen] Erreur capture GPS ponctuelle :', err);
         setCorridorPosition(null);
+        setDriverCoords(null);
         setLocationFailed(true);
+        setRelevantAlertItems([]);
       } finally {
         if (isMounted) {
           setIsLocating(false);
@@ -91,7 +112,56 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
     return () => {
       isMounted = false;
     };
-  }, []);
+  }, [overrideCoordinates]);
+
+  // Calcul local de la pertinence des alertes via le moteur partagé getRelevantAlertsForDriver()
+  useEffect(() => {
+    if (!driverCoords) {
+      setRelevantAlertItems([]);
+      return;
+    }
+
+    let isMounted = true;
+
+    const computeRelevance = async () => {
+      try {
+        const result = await getRelevantAlertsForDriver(
+          driverCoords.latitude,
+          driverCoords.longitude,
+          direction,
+          overrideNow
+        );
+        if (!isMounted) return;
+        setRelevantAlertItems(result.relevantAlerts || []);
+      } catch (err) {
+        if (!isMounted) return;
+        console.warn('[HomeScreen] Erreur calcul alertes pertinentes :', err);
+        setRelevantAlertItems([]);
+      }
+    };
+
+    computeRelevance();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [driverCoords, direction, alerts, overrideNow]);
+
+  // Détermination de l'alerte principale : STRICTEMENT la première alerte pertinente retournée par le moteur
+  const primaryRelevantItem = relevantAlertItems[0] || null;
+  const primaryAlert = primaryRelevantItem ? primaryRelevantItem.alert : null;
+
+  // Alertes secondaires pertinentes (strictement issues du moteur)
+  const secondaryAlertsCount = Math.max(0, relevantAlertItems.length - 1);
+  const secondaryRelevantItem = relevantAlertItems[1] || null;
+  const secondaryAlert = secondaryRelevantItem ? secondaryRelevantItem.alert : null;
+
+  // Calcul du libellé de distance basé sur l'estimation réelle du moteur de corridor
+  const primaryDistanceText = primaryRelevantItem
+    ? (primaryRelevantItem.estimatedDistanceKm <= 0.5
+        ? "Sur le lieu de l'alerte"
+        : `${Math.round(primaryRelevantItem.estimatedDistanceKm)} km devant vous`)
+    : (primaryAlert?.distanceText || 'Distance indéterminée');
 
   const handleListenAlert = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -236,8 +306,36 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
         </div>
       </div>
 
-      {/* 3. PRIMARY IMMINENT DANGER CARD */}
-      {primaryAlert ? (
+      {/* 3. PRIMARY IMMINENT DANGER CARD / POSITION STATUS */}
+      {isLocating ? (
+        <div className="w-full bg-white rounded-2xl p-6 text-center shadow-sm border border-slate-200">
+          <div className="w-12 h-12 rounded-full bg-blue-50 text-[#123b5d] flex items-center justify-center mx-auto mb-2">
+            <span className="material-symbols-outlined text-[26px] animate-spin">sync</span>
+          </div>
+          <h3 className="font-extrabold text-[16px] text-[#002541]">Recherche de position GPS...</h3>
+          <p className="text-xs text-[#5a6573] mt-1">Évaluation de la pertinence des dangers sur votre trajet.</p>
+        </div>
+      ) : locationFailed || !driverCoords ? (
+        <div className="w-full bg-white rounded-2xl p-6 text-center shadow-sm border border-slate-200">
+          <div className="w-12 h-12 rounded-full bg-slate-100 text-[#5a6573] flex items-center justify-center mx-auto mb-2">
+            <span className="material-symbols-outlined text-[28px]">location_off</span>
+          </div>
+          <h3 className="font-extrabold text-[16px] text-[#002541]">Localisation GPS indisponible</h3>
+          <p className="text-xs text-[#5a6573] mt-1">
+            Activez la géolocalisation pour déterminer la pertinence des alertes sur votre axe.
+          </p>
+        </div>
+      ) : corridorPosition && !corridorPosition.isOnCorridor ? (
+        <div className="w-full bg-white rounded-2xl p-6 text-center shadow-sm border border-amber-200">
+          <div className="w-12 h-12 rounded-full bg-amber-50 text-[#b54708] flex items-center justify-center mx-auto mb-2">
+            <span className="material-symbols-outlined text-[28px]">wrong_location</span>
+          </div>
+          <h3 className="font-extrabold text-[16px] text-[#002541]">Véhicule hors corridor N4</h3>
+          <p className="text-xs text-[#5a6573] mt-1">
+            Le calcul de pertinence des dangers est actif uniquement sur le corridor Yaoundé ↔ Bafoussam.
+          </p>
+        </div>
+      ) : primaryAlert ? (
         <div className="flex flex-col gap-2">
           <div className="flex items-center justify-between px-0.5">
             <span className="text-[12px] text-[#002541] uppercase tracking-wider font-black flex items-center gap-1.5">
@@ -268,7 +366,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
             {/* Distance & Sector */}
             <div className="flex flex-col">
               <div className="text-[36px] font-black text-[#d92d20] leading-none tracking-tight">
-                {primaryAlert.distanceText || '8 km devant vous'}
+                {primaryDistanceText}
               </div>
               <div className="flex items-center gap-1 text-[#42474e] text-[13px] font-semibold mt-1.5">
                 <span className="material-symbols-outlined text-[16px] text-[#002541]">alt_route</span>

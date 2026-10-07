@@ -30,7 +30,7 @@ async function runRealFlowTest() {
     // ÉTAPE 2 : INTERPRÉTATION IA (AIInterpreter)
     // ----------------------------------------------------
     console.log('\n2. INTERPRÉTATION IA : Analyse du message...');
-    const interpretation = AIInterpreter.interpret(spokenVoiceText);
+    const interpretation = await AIInterpreter.interpret(spokenVoiceText);
     console.log('   - Type de danger détecté :', interpretation.dangerType);
     console.log('   - Code alerte :', interpretation.alertType);
     console.log('   - Secteur extrait :', interpretation.sector);
