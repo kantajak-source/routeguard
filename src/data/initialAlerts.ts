@@ -5,9 +5,9 @@ export const INITIAL_ALERTS: AlertItem[] = [
     id: 'alert-1',
     type: 'ACCIDENT',
     severity: 'CRITIQUE',
-    title: 'ACCIDENT GRAVE',
-    badgeText: 'ACCIDENT GRAVE',
-    description: 'Accident grave à 8 km, collision camion et minibus',
+    title: 'ACCIDENT',
+    badgeText: 'ACCIDENT',
+    description: 'Accident à 8 km, collision camion et minibus',
     location: 'Axe Bafia Sud',
     route: 'Yaoundé-Bafoussam',
     status: 'CONFIRMED',
@@ -18,7 +18,7 @@ export const INITIAL_ALERTS: AlertItem[] = [
     direction: '→ Bafoussam',
     subDetail: 'Voie droite obstruée, collision camion et minibus',
     audioDuration: '0:24',
-    audioTranscript: 'Attention à tous les confrères sur la N4, accident grave à 8 kilomètres devant vous au niveau de Bafia Sud. Réduisez immédiatement la vitesse.',
+    audioTranscript: 'Attention à tous les confrères sur la N4, accident à 8 kilomètres devant vous au niveau de Bafia Sud. Réduisez immédiatement la vitesse.',
     confirmationsCount: 4,
     confirmationCount: 4,
     confirmedBy: ['Chauffeur 101', 'Chauffeur 104', 'Chauffeur 208', 'Chauffeur 312'],
@@ -81,7 +81,7 @@ export const SAMPLE_VOICE_REPORTS = [
     description: 'Cas de référence du cahier des charges'
   },
   {
-    label: 'Accident grave camion Makénéné',
+    label: 'Accident camion Makénéné',
     text: 'Gros accident camion renversé à 12 kilomètres devant nous vers Makénéné',
     description: 'Collision avec blocage partiel'
   },

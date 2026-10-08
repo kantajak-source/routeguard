@@ -19,8 +19,11 @@ import { authService } from './authService';
 import {
   corridorService,
   filterRelevantAlerts,
+  prioritizeRelevantAlerts,
   CorridorDirection,
   FilterRelevantAlertsResult,
+  RelevantAlertItem,
+  PrioritizedAlertItem,
   DEFAULT_MAX_ALERT_DISTANCE_KM,
   DEFAULT_MAX_ALERT_AGE_MINUTES,
 } from './corridorService';
@@ -259,7 +262,7 @@ export class FirebaseAlertService {
     const alerts = await this.getAlerts();
 
     // 2. Filtrer localement via le moteur pur de pertinence
-    return filterRelevantAlerts(
+    const result = filterRelevantAlerts(
       alerts,
       driverLatitude,
       driverLongitude,
@@ -268,6 +271,12 @@ export class FirebaseAlertService {
       maxDistanceKm,
       maxAgeMinutes
     );
+
+    // 3. Prioriser UNIQUEMENT les alertes pertinentes (Étape J-1-3-3-A)
+    return {
+      ...result,
+      relevantAlerts: prioritizeRelevantAlerts(result.relevantAlerts) as (RelevantAlertItem<AlertItem> & { ageMinutes: number })[],
+    };
   }
 
   /**
@@ -427,6 +436,139 @@ export class FirebaseAlertService {
       name: 'TEST INTÉGRATION mapDocToAlertItem -> filterRelevantAlerts',
       passed: isIntegrityOk && isIntegrationFilterOk,
       details: `intégrité: ${isIntegrityOk}, filtrage moteur: ${isIntegrationFilterOk}`,
+    });
+
+    // =========================================================================
+    // TESTS J-1-3-3-A : INTÉGRATION DE LA PRIORISATION DANS ALERTSERVICE
+    // =========================================================================
+
+    // T01 : Deux alertes pertinentes : ACCIDENT AHEAD 50 km, ACCIDENT AHEAD 5 km -> 5 km première
+    const alertT01_50 = this.mapDocToAlertItem('t01-50', {
+      type: 'ACCIDENT',
+      description: 'Accident 50km',
+      latitude: 4.8428,
+      longitude: 11.0643, // PK 175 -> 50 km devant Chauffeur Bafia PK 125
+      createdAt: nowMs - 10 * 60 * 1000,
+      direction: 'Bafoussam',
+    });
+    const alertT01_5 = this.mapDocToAlertItem('t01-5', {
+      type: 'ACCIDENT',
+      description: 'Accident 5km',
+      latitude: 4.7125,
+      longitude: 11.2375, // PK 130 -> 5 km devant Chauffeur Bafia PK 125
+      createdAt: nowMs - 10 * 60 * 1000,
+      direction: 'Bafoussam',
+    });
+    const filterT01 = filterRelevantAlerts([alertT01_50, alertT01_5], 4.7500, 11.2333, 'YAOUNDE_TO_BAFOUSSAM', NOW_TEST, 80);
+    const prioritizedT01 = prioritizeRelevantAlerts(filterT01.relevantAlerts);
+    results.push({
+      name: 'J-1-3-3-A - T01 : ACCIDENT 50 km vs ACCIDENT 5 km -> 5 km première',
+      passed: prioritizedT01.length === 2 && prioritizedT01[0].alert.id === 't01-5' && prioritizedT01[1].alert.id === 't01-50',
+      details: `premier: ${prioritizedT01[0]?.alert.id} (${prioritizedT01[0]?.estimatedDistanceKm} km)`,
+    });
+
+    // T02 : ACCIDENT AHEAD 5 km vs VEHICULE_IMMOBILISE AHEAD 5 km -> ACCIDENT premier
+    const alertT02_panne = this.mapDocToAlertItem('t02-panne', {
+      type: 'VEHICULE_IMMOBILISE',
+      description: 'Camion en panne 5km',
+      latitude: 4.7125,
+      longitude: 11.2375, // PK 130 -> 5 km
+      createdAt: nowMs - 10 * 60 * 1000,
+      direction: 'Bafoussam',
+    });
+    const filterT02 = filterRelevantAlerts([alertT02_panne, alertT01_5], 4.7500, 11.2333, 'YAOUNDE_TO_BAFOUSSAM', NOW_TEST, 80);
+    const prioritizedT02 = prioritizeRelevantAlerts(filterT02.relevantAlerts);
+    results.push({
+      name: 'J-1-3-3-A - T02 : ACCIDENT AHEAD 5 km vs VEHICULE_IMMOBILISE AHEAD 5 km -> ACCIDENT premier',
+      passed: prioritizedT02.length === 2 && prioritizedT02[0].alert.id === 't01-5' && prioritizedT02[1].alert.id === 't02-panne',
+      details: `premier: ${prioritizedT02[0]?.alert.id} (type: ${prioritizedT02[0]?.alert.type})`,
+    });
+
+    // T03 : VEHICULE_IMMOBILISE AT_EVENT vs ACCIDENT AHEAD 5 km -> AT_EVENT premier
+    const alertT03_atevent = this.mapDocToAlertItem('t03-atevent', {
+      type: 'VEHICULE_IMMOBILISE',
+      description: 'Panne au niveau immédiat (Bafia)',
+      latitude: 4.7500,
+      longitude: 11.2333, // PK 125 -> 0 km (AT_EVENT)
+      createdAt: nowMs - 10 * 60 * 1000,
+      direction: 'Bafoussam',
+    });
+    const filterT03 = filterRelevantAlerts([alertT01_5, alertT03_atevent], 4.7500, 11.2333, 'YAOUNDE_TO_BAFOUSSAM', NOW_TEST, 80);
+    const prioritizedT03 = prioritizeRelevantAlerts(filterT03.relevantAlerts);
+    results.push({
+      name: 'J-1-3-3-A - T03 : VEHICULE_IMMOBILISE AT_EVENT vs ACCIDENT AHEAD 5 km -> AT_EVENT premier',
+      passed: prioritizedT03.length === 2 && prioritizedT03[0].alert.id === 't03-atevent' && prioritizedT03[1].alert.id === 't01-5',
+      details: `premier: ${prioritizedT03[0]?.alert.id} (pos: ${prioritizedT03[0]?.relativePosition})`,
+    });
+
+    // T04 : Deux alertes : une pertinente (ACCIDENT 5 km), une exclue (trop loin 170 km) -> seule la pertinente apparaît
+    const alertT04_far = this.mapDocToAlertItem('t04-far', {
+      type: 'ACCIDENT',
+      description: 'Accident très loin',
+      latitude: 5.4667,
+      longitude: 10.4167, // Bafoussam PK 295 -> 170 km > 80 km (TOO_FAR)
+      createdAt: nowMs - 10 * 60 * 1000,
+      direction: 'Bafoussam',
+    });
+    const filterT04 = filterRelevantAlerts([alertT01_5, alertT04_far], 4.7500, 11.2333, 'YAOUNDE_TO_BAFOUSSAM', NOW_TEST, 80);
+    const resultT04 = {
+      ...filterT04,
+      relevantAlerts: prioritizeRelevantAlerts(filterT04.relevantAlerts),
+    };
+    results.push({
+      name: 'J-1-3-3-A - T04 : Une alerte pertinente + une exclue -> seule la pertinente dans relevantAlerts',
+      passed: resultT04.relevantAlerts.length === 1 && resultT04.relevantAlerts[0].alert.id === 't01-5' && resultT04.excludedAlerts.length === 1,
+      details: `relevantCount: ${resultT04.relevantAlerts.length}, excludedCount: ${resultT04.excludedAlerts.length}`,
+    });
+
+    // T05 : excludedAlerts reste strictement inchangé par la priorisation
+    const isExcludedUnchanged = filterT04.excludedAlerts === resultT04.excludedAlerts &&
+      resultT04.excludedAlerts[0]?.alert.id === 't04-far' &&
+      resultT04.excludedAlerts[0]?.geographicStatus === 'TOO_FAR';
+    results.push({
+      name: 'J-1-3-3-A - T05 : excludedAlerts reste strictement inchangé par la priorisation',
+      passed: isExcludedUnchanged,
+      details: `excludedAlerts inchangé: ${isExcludedUnchanged}`,
+    });
+
+    // T06 : Métadonnées du résultat préservées (driverPk, isDriverOnCorridor, maxDistanceKm, maxAgeMinutes)
+    const areMetadataPreserved =
+      resultT04.driverPk === filterT04.driverPk &&
+      resultT04.isDriverOnCorridor === filterT04.isDriverOnCorridor &&
+      resultT04.maxDistanceKm === filterT04.maxDistanceKm &&
+      resultT04.maxAgeMinutes === filterT04.maxAgeMinutes &&
+      resultT04.relevantAlerts[0].alertPk !== undefined &&
+      resultT04.relevantAlerts[0].driverPk !== undefined &&
+      resultT04.relevantAlerts[0].relativePosition !== undefined &&
+      resultT04.relevantAlerts[0].estimatedDistanceKm !== undefined;
+    results.push({
+      name: 'J-1-3-3-A - T06 : driverPk, métadonnées et intégrité des alertes conservés',
+      passed: areMetadataPreserved,
+      details: `driverPk: ${resultT04.driverPk}, isDriverOnCorridor: ${resultT04.isDriverOnCorridor}`,
+    });
+
+    // T07 : Une alerte exclue ne peut pas être promue par confirmationCount ou type
+    const alertT07_promoted = this.mapDocToAlertItem('t07-promoted', {
+      type: 'ACCIDENT', // type critique
+      confirmationCount: 99, // 99 confirmations
+      description: 'Accident derrière le chauffeur',
+      latitude: 4.1672,
+      longitude: 11.5333, // Obala PK 42 -> derrière Bafia PK 125 (BEHIND)
+      createdAt: nowMs - 5 * 60 * 1000,
+      direction: 'Bafoussam',
+    });
+    const filterT07 = filterRelevantAlerts([alertT07_promoted], 4.7500, 11.2333, 'YAOUNDE_TO_BAFOUSSAM', NOW_TEST, 80);
+    const resultT07 = {
+      ...filterT07,
+      relevantAlerts: prioritizeRelevantAlerts(filterT07.relevantAlerts),
+    };
+    const isExclusionSealed = resultT07.relevantAlerts.length === 0 &&
+      resultT07.excludedAlerts.length === 1 &&
+      resultT07.excludedAlerts[0].alert.id === 't07-promoted';
+    results.push({
+      name: 'J-1-3-3-A - T07 : Alerte exclue jamais promue malgré 99 confirmations et type ACCIDENT',
+      passed: isExclusionSealed,
+      details: `relevantCount: ${resultT07.relevantAlerts.length} (attendu 0), excludedReason: ${resultT07.excludedAlerts[0]?.reason}`,
     });
 
     return results;

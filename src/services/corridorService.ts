@@ -169,6 +169,24 @@ export interface FilterRelevantAlertsResult<T = any> {
   maxAgeMinutes: number;
 }
 
+/**
+ * Niveaux stricts de priorité ROUTEGUARD (Étape J-1-3-2)
+ */
+export type PriorityLevel = 'CRITICAL' | 'HIGH' | 'NORMAL';
+
+export const PRIORITY_NEAR_DISTANCE_KM = 10;
+export const PRIORITY_MEDIUM_DISTANCE_KM = 30;
+
+/**
+ * Alerte pertinente priorisée avec son niveau et ses motifs (Étape J-1-3-2)
+ */
+export interface PrioritizedAlertItem<T = any> extends RelevantAlertItem<T> {
+  alert: T;
+  priorityLevel: PriorityLevel;
+  priorityScore: number;
+  priorityReason: string;
+}
+
 // ----------------------------------------------------------------------------
 // 2. RÉFÉRENTIEL DU CORRIDOR (PK de référence ROUTEGUARD)
 // ----------------------------------------------------------------------------
@@ -279,6 +297,224 @@ function projectPointOnSegment(
   const projLat = ay + t * vy;
 
   return { t, projLat, projLon };
+}
+
+// ----------------------------------------------------------------------------
+// 3B. FONCTIONS PURES DE PRIORISATION LOCALE (ÉTAPE J-1-3-2)
+// ----------------------------------------------------------------------------
+
+/**
+ * Extrait de façon sûre le nombre de confirmations d'une alerte.
+ * Utilisé UNIQUEMENT comme critère de départage à niveau et distance identiques.
+ */
+export function getAlertConfirmationCount(alert: any): number {
+  if (!alert) return 0;
+  if (typeof alert.confirmationCount === 'number' && !isNaN(alert.confirmationCount) && alert.confirmationCount >= 0) {
+    return alert.confirmationCount;
+  }
+  if (typeof alert.confirmationsCount === 'number' && !isNaN(alert.confirmationsCount) && alert.confirmationsCount >= 0) {
+    return alert.confirmationsCount;
+  }
+  if (Array.isArray(alert.confirmedBy)) {
+    return alert.confirmedBy.length;
+  }
+  if (Array.isArray(alert.confirmedByUids)) {
+    return alert.confirmedByUids.length;
+  }
+  return 0;
+}
+
+/**
+ * Détermine le niveau et le motif de priorité stricts selon la spécification J-1-3-2 :
+ * 
+ * A. AT_EVENT :
+ *    Tout événement AT_EVENT -> CRITICAL (prioritaire sur tout AHEAD).
+ * 
+ * B. ACCIDENT AHEAD :
+ *    - ACCIDENT + AHEAD + distance <= 10 km -> CRITICAL
+ *    - ACCIDENT + AHEAD + distance > 10 km et <= 30 km -> HIGH
+ *    - ACCIDENT + AHEAD + distance > 30 km -> NORMAL
+ * 
+ * C. AUTRES DANGERS AHEAD :
+ *    - Autre danger + AHEAD + distance <= 10 km -> HIGH
+ *    - Autre danger + AHEAD + distance > 10 km -> NORMAL
+ * 
+ * IMPORTANT : Le type ACCIDENT reste strictement 'ACCIDENT', aucun type dérivé n'est inventé.
+ */
+export function determineAlertPriorityLevel(
+  relativePosition: RelativePosition | string | undefined,
+  distanceKm: number | null | undefined,
+  type: string | undefined
+): { priorityLevel: PriorityLevel; priorityReason: string } {
+  // A. Position immédiate : Tout événement au niveau du véhicule -> CRITICAL
+  if (relativePosition === 'AT_EVENT') {
+    return {
+      priorityLevel: 'CRITICAL',
+      priorityReason: 'Événement immédiat au niveau du chauffeur (AT_EVENT)',
+    };
+  }
+
+  const cleanType = String(type || '').trim().toUpperCase();
+  const isAccident = cleanType === 'ACCIDENT';
+  const effectiveDist = typeof distanceKm === 'number' && !isNaN(distanceKm) && distanceKm >= 0 ? distanceKm : Infinity;
+
+  // B. ACCIDENT AHEAD
+  if (isAccident) {
+    if (effectiveDist <= PRIORITY_NEAR_DISTANCE_KM) {
+      return {
+        priorityLevel: 'CRITICAL',
+        priorityReason: `Accident devant à proximité immédiate (≤ ${PRIORITY_NEAR_DISTANCE_KM} km)`,
+      };
+    }
+    if (effectiveDist <= PRIORITY_MEDIUM_DISTANCE_KM) {
+      return {
+        priorityLevel: 'HIGH',
+        priorityReason: `Accident devant à distance intermédiaire (≤ ${PRIORITY_MEDIUM_DISTANCE_KM} km)`,
+      };
+    }
+    return {
+      priorityLevel: 'NORMAL',
+      priorityReason: `Accident devant à distance (> ${PRIORITY_MEDIUM_DISTANCE_KM} km)`,
+    };
+  }
+
+  // C. AUTRES DANGERS AHEAD
+  if (effectiveDist <= PRIORITY_NEAR_DISTANCE_KM) {
+    return {
+      priorityLevel: 'HIGH',
+      priorityReason: `Danger routier devant à proximité (≤ ${PRIORITY_NEAR_DISTANCE_KM} km)`,
+    };
+  }
+
+  return {
+    priorityLevel: 'NORMAL',
+    priorityReason: `Danger routier devant à distance (> ${PRIORITY_NEAR_DISTANCE_KM} km)`,
+  };
+}
+
+/**
+ * Calcule un score composite numérique de priorité pour une alerte pertinente.
+ * Le niveau fonctionnel (CRITICAL / HIGH / NORMAL) domine strictement le score.
+ */
+export function calculateAlertPriorityScore<T>(
+  item: RelevantAlertItem<T> & { priorityLevel?: PriorityLevel }
+): number {
+  const level = item.priorityLevel || determineAlertPriorityLevel(
+    item.relativePosition,
+    item.estimatedDistanceKm,
+    (item.alert as any)?.type
+  ).priorityLevel;
+
+  const baseLevelScore = level === 'CRITICAL' ? 1000 : (level === 'HIGH' ? 500 : 100);
+  const atEventBonus = item.relativePosition === 'AT_EVENT' ? 50 : 0;
+  const dist = typeof item.estimatedDistanceKm === 'number' && !isNaN(item.estimatedDistanceKm) && item.estimatedDistanceKm >= 0
+    ? item.estimatedDistanceKm
+    : 80;
+  const proximityBonus = Math.max(0, 80 - dist) * 2; // 0 à 160
+  const confCount = getAlertConfirmationCount(item.alert);
+  const confirmationBonus = Math.min(20, confCount); // 0 à 20
+
+  return baseLevelScore + atEventBonus + proximityBonus + confirmationBonus;
+}
+
+/**
+ * Comparateur déterministe strict pour le tri des alertes déjà pertinentes.
+ * 
+ * Hiérarchie :
+ * 1. priorityLevel : CRITICAL (3) > HIGH (2) > NORMAL (1)
+ * 2. relativePosition : AT_EVENT avant AHEAD
+ * 3. Proximité géographique : distance estimée croissante (la plus proche en tête)
+ * 4. Confirmations communautaires : confirmationCount décroissant
+ * 5. Fraîcheur : ageMinutes croissant (plus récente en tête)
+ * 6. Déterminisme stable : identifiant lexicographique
+ */
+export function compareRelevantAlertsPriority<T>(
+  a: PrioritizedAlertItem<T>,
+  b: PrioritizedAlertItem<T>
+): number {
+  const levelOrder: Record<PriorityLevel, number> = {
+    CRITICAL: 3,
+    HIGH: 2,
+    NORMAL: 1,
+  };
+
+  // 1. Niveau de priorité
+  const diffLevel = levelOrder[b.priorityLevel] - levelOrder[a.priorityLevel];
+  if (diffLevel !== 0) {
+    return diffLevel; // Décroissant
+  }
+
+  // 2. Position relative : AT_EVENT avant AHEAD
+  if (a.relativePosition !== b.relativePosition) {
+    if (a.relativePosition === 'AT_EVENT') return -1;
+    if (b.relativePosition === 'AT_EVENT') return 1;
+  }
+
+  // 3. Distance estimée (croissante : la plus courte d'abord)
+  const distA = typeof a.estimatedDistanceKm === 'number' && !isNaN(a.estimatedDistanceKm) ? a.estimatedDistanceKm : Infinity;
+  const distB = typeof b.estimatedDistanceKm === 'number' && !isNaN(b.estimatedDistanceKm) ? b.estimatedDistanceKm : Infinity;
+  if (distA !== distB) {
+    return distA - distB;
+  }
+
+  // 4. Confirmations communautaires (décroissant : plus confirmé en tête)
+  const confA = getAlertConfirmationCount(a.alert);
+  const confB = getAlertConfirmationCount(b.alert);
+  if (confA !== confB) {
+    return confB - confA;
+  }
+
+  // 5. Fraîcheur temporelle (âge croissant : la plus récente d'abord)
+  const ageA = typeof a.ageMinutes === 'number' && !isNaN(a.ageMinutes) ? a.ageMinutes : Infinity;
+  const ageB = typeof b.ageMinutes === 'number' && !isNaN(b.ageMinutes) ? b.ageMinutes : Infinity;
+  if (ageA !== ageB) {
+    return ageA - ageB;
+  }
+
+  // 6. Ordre déterministe stable basé sur l'identifiant
+  const idA = String((a.alert as any)?.id || '');
+  const idB = String((b.alert as any)?.id || '');
+  return idA.localeCompare(idB);
+}
+
+/**
+ * Fonction pure de priorisation des alertes pertinentes (Étape J-1-3-2).
+ * Reçoit UNIQUEMENT des alertes déjà pertinentes.
+ * Ne modifie jamais le tableau source reçu (immutabilité stricte).
+ */
+export function prioritizeRelevantAlerts<T = any>(
+  relevantAlerts: readonly RelevantAlertItem<T>[]
+): PrioritizedAlertItem<T>[] {
+  if (!Array.isArray(relevantAlerts) || relevantAlerts.length === 0) {
+    return [];
+  }
+
+  // 1. Cloner et enrichir chaque alerte sans muter la source
+  const prioritizedItems: PrioritizedAlertItem<T>[] = relevantAlerts.map((item) => {
+    const alertType = (item.alert as any)?.type;
+    const { priorityLevel, priorityReason } = determineAlertPriorityLevel(
+      item.relativePosition,
+      item.estimatedDistanceKm,
+      alertType
+    );
+
+    const score = calculateAlertPriorityScore({
+      ...item,
+      priorityLevel,
+    });
+
+    return {
+      ...item,
+      priorityLevel,
+      priorityScore: score,
+      priorityReason,
+    };
+  });
+
+  // 2. Trier le nouveau tableau
+  prioritizedItems.sort(compareRelevantAlertsPriority);
+
+  return prioritizedItems;
 }
 
 // ----------------------------------------------------------------------------
@@ -1101,6 +1337,17 @@ export class CorridorService {
   }
 
   /**
+   * ÉTAPE J-1-3-2 : Priorisation pure des alertes pertinentes.
+   * Fonction PURE sans effet de bord, sans réseau, sans GPS matériel, sans accès Firestore.
+   * Ne modifie jamais le tableau source reçu (immutabilité garantie).
+   */
+  public prioritizeRelevantAlerts<T = any>(
+    relevantAlerts: readonly RelevantAlertItem<T>[]
+  ): PrioritizedAlertItem<T>[] {
+    return prioritizeRelevantAlerts(relevantAlerts);
+  }
+
+  /**
    * Suite de tests de validation géométrique interne (auto-diagnostic).
    * Vérifie les calculs de projection et les règles directionnelles.
    */
@@ -1724,15 +1971,178 @@ export class CorridorService {
     });
 
     // =========================================================================
+    // TESTS OBLIGATOIRES ÉTAPE J-1-3-2 (PRIORISATION DES ALERTES PERTINENTES)
+    // =========================================================================
+
+    // T01 : ACCIDENT + AT_EVENT -> CRITICAL
+    const itemT01 = { alert: { id: 't01', type: 'ACCIDENT' }, relativePosition: 'AT_EVENT' as const, estimatedDistanceKm: 0, alertPk: 125, driverPk: 125, ageMinutes: 10 };
+    const resT01 = this.prioritizeRelevantAlerts([itemT01]);
+    results.push({
+      name: 'J-1-3-2 - T01 : ACCIDENT + AT_EVENT -> CRITICAL',
+      passed: resT01.length === 1 && resT01[0].priorityLevel === 'CRITICAL',
+      details: `level: ${resT01[0]?.priorityLevel} (attendu CRITICAL)`,
+    });
+
+    // T02 : ACCIDENT + AHEAD + 5 km -> CRITICAL
+    const itemT02 = { alert: { id: 't02', type: 'ACCIDENT' }, relativePosition: 'AHEAD' as const, estimatedDistanceKm: 5, alertPk: 130, driverPk: 125, ageMinutes: 10 };
+    const resT02 = this.prioritizeRelevantAlerts([itemT02]);
+    results.push({
+      name: 'J-1-3-2 - T02 : ACCIDENT + AHEAD + 5 km -> CRITICAL',
+      passed: resT02.length === 1 && resT02[0].priorityLevel === 'CRITICAL',
+      details: `level: ${resT02[0]?.priorityLevel} (attendu CRITICAL)`,
+    });
+
+    // T03 : ACCIDENT + AHEAD + 10 km -> CRITICAL (borne inclusive)
+    const itemT03 = { alert: { id: 't03', type: 'ACCIDENT' }, relativePosition: 'AHEAD' as const, estimatedDistanceKm: 10, alertPk: 135, driverPk: 125, ageMinutes: 10 };
+    const resT03 = this.prioritizeRelevantAlerts([itemT03]);
+    results.push({
+      name: 'J-1-3-2 - T03 : ACCIDENT + AHEAD + 10 km -> CRITICAL',
+      passed: resT03.length === 1 && resT03[0].priorityLevel === 'CRITICAL',
+      details: `level: ${resT03[0]?.priorityLevel} (attendu CRITICAL)`,
+    });
+
+    // T04 : ACCIDENT + AHEAD + 20 km -> HIGH
+    const itemT04 = { alert: { id: 't04', type: 'ACCIDENT' }, relativePosition: 'AHEAD' as const, estimatedDistanceKm: 20, alertPk: 145, driverPk: 125, ageMinutes: 10 };
+    const resT04 = this.prioritizeRelevantAlerts([itemT04]);
+    results.push({
+      name: 'J-1-3-2 - T04 : ACCIDENT + AHEAD + 20 km -> HIGH',
+      passed: resT04.length === 1 && resT04[0].priorityLevel === 'HIGH',
+      details: `level: ${resT04[0]?.priorityLevel} (attendu HIGH)`,
+    });
+
+    // T05 : ACCIDENT + AHEAD + 30 km -> HIGH (borne inclusive)
+    const itemT05 = { alert: { id: 't05', type: 'ACCIDENT' }, relativePosition: 'AHEAD' as const, estimatedDistanceKm: 30, alertPk: 155, driverPk: 125, ageMinutes: 10 };
+    const resT05 = this.prioritizeRelevantAlerts([itemT05]);
+    results.push({
+      name: 'J-1-3-2 - T05 : ACCIDENT + AHEAD + 30 km -> HIGH',
+      passed: resT05.length === 1 && resT05[0].priorityLevel === 'HIGH',
+      details: `level: ${resT05[0]?.priorityLevel} (attendu HIGH)`,
+    });
+
+    // T06 : ACCIDENT + AHEAD + 50 km -> NORMAL
+    const itemT06 = { alert: { id: 't06', type: 'ACCIDENT' }, relativePosition: 'AHEAD' as const, estimatedDistanceKm: 50, alertPk: 175, driverPk: 125, ageMinutes: 10 };
+    const resT06 = this.prioritizeRelevantAlerts([itemT06]);
+    results.push({
+      name: 'J-1-3-2 - T06 : ACCIDENT + AHEAD + 50 km -> NORMAL',
+      passed: resT06.length === 1 && resT06[0].priorityLevel === 'NORMAL',
+      details: `level: ${resT06[0]?.priorityLevel} (attendu NORMAL)`,
+    });
+
+    // T07 : VEHICULE_IMMOBILISE + AT_EVENT -> CRITICAL
+    const itemT07 = { alert: { id: 't07', type: 'VEHICULE_IMMOBILISE' }, relativePosition: 'AT_EVENT' as const, estimatedDistanceKm: 0, alertPk: 125, driverPk: 125, ageMinutes: 10 };
+    const resT07 = this.prioritizeRelevantAlerts([itemT07]);
+    results.push({
+      name: 'J-1-3-2 - T07 : VEHICULE_IMMOBILISE + AT_EVENT -> CRITICAL',
+      passed: resT07.length === 1 && resT07[0].priorityLevel === 'CRITICAL',
+      details: `level: ${resT07[0]?.priorityLevel} (attendu CRITICAL)`,
+    });
+
+    // T08 : VEHICULE_IMMOBILISE + AHEAD + 5 km -> HIGH
+    const itemT08 = { alert: { id: 't08', type: 'VEHICULE_IMMOBILISE' }, relativePosition: 'AHEAD' as const, estimatedDistanceKm: 5, alertPk: 130, driverPk: 125, ageMinutes: 10 };
+    const resT08 = this.prioritizeRelevantAlerts([itemT08]);
+    results.push({
+      name: 'J-1-3-2 - T08 : VEHICULE_IMMOBILISE + AHEAD + 5 km -> HIGH',
+      passed: resT08.length === 1 && resT08[0].priorityLevel === 'HIGH',
+      details: `level: ${resT08[0]?.priorityLevel} (attendu HIGH)`,
+    });
+
+    // T09 : VEHICULE_IMMOBILISE + AHEAD + 20 km -> NORMAL
+    const itemT09 = { alert: { id: 't09', type: 'VEHICULE_IMMOBILISE' }, relativePosition: 'AHEAD' as const, estimatedDistanceKm: 20, alertPk: 145, driverPk: 125, ageMinutes: 10 };
+    const resT09 = this.prioritizeRelevantAlerts([itemT09]);
+    results.push({
+      name: 'J-1-3-2 - T09 : VEHICULE_IMMOBILISE + AHEAD + 20 km -> NORMAL',
+      passed: resT09.length === 1 && resT09[0].priorityLevel === 'NORMAL',
+      details: `level: ${resT09[0]?.priorityLevel} (attendu NORMAL)`,
+    });
+
+    // T10 : FORTE_PLUIE + AHEAD + 70 km -> NORMAL
+    const itemT10 = { alert: { id: 't10', type: 'FORTE_PLUIE' }, relativePosition: 'AHEAD' as const, estimatedDistanceKm: 70, alertPk: 195, driverPk: 125, ageMinutes: 10 };
+    const resT10 = this.prioritizeRelevantAlerts([itemT10]);
+    results.push({
+      name: 'J-1-3-2 - T10 : FORTE_PLUIE + AHEAD + 70 km -> NORMAL',
+      passed: resT10.length === 1 && resT10[0].priorityLevel === 'NORMAL',
+      details: `level: ${resT10[0]?.priorityLevel} (attendu NORMAL)`,
+    });
+
+    // T11 : ACCIDENT à 50 km vs ACCIDENT à 5 km -> 5 km premier
+    const resT11 = this.prioritizeRelevantAlerts([itemT06, itemT02]);
+    results.push({
+      name: 'J-1-3-2 - T11 : ACCIDENT à 50 km vs ACCIDENT à 5 km -> 5 km premier',
+      passed: resT11.length === 2 && resT11[0].alert.id === 't02' && resT11[1].alert.id === 't06',
+      details: `Ordre: [${resT11.map(r => r.alert.id).join(', ')}] (attendu: [t02, t06])`,
+    });
+
+    // T12 : ACCIDENT à 5 km vs VEHICULE_IMMOBILISE à 5 km -> ACCIDENT premier
+    const resT12 = this.prioritizeRelevantAlerts([itemT08, itemT02]);
+    results.push({
+      name: 'J-1-3-2 - T12 : ACCIDENT à 5 km vs VEHICULE_IMMOBILISE à 5 km -> ACCIDENT premier',
+      passed: resT12.length === 2 && resT12[0].alert.id === 't02' && resT12[1].alert.id === 't08',
+      details: `Ordre: [${resT12.map(r => r.alert.id).join(', ')}] (attendu: [t02, t08])`,
+    });
+
+    // T13 : VEHICULE_IMMOBILISE AT_EVENT vs ACCIDENT AHEAD 5 km -> AT_EVENT premier
+    const resT13 = this.prioritizeRelevantAlerts([itemT02, itemT07]);
+    results.push({
+      name: 'J-1-3-2 - T13 : VEHICULE_IMMOBILISE AT_EVENT vs ACCIDENT AHEAD 5 km -> AT_EVENT premier',
+      passed: resT13.length === 2 && resT13[0].alert.id === 't07' && resT13[1].alert.id === 't02',
+      details: `Ordre: [${resT13.map(r => r.alert.id).join(', ')}] (attendu: [t07, t02])`,
+    });
+
+    // T14 : Même niveau, même distance : confirmationCount 10 vs confirmationCount 1 -> 10 confirmations premier
+    const itemConf1 = { alert: { id: 'conf1', type: 'OBSTACLE', confirmationCount: 1 }, relativePosition: 'AHEAD' as const, estimatedDistanceKm: 5, alertPk: 130, driverPk: 125, ageMinutes: 10 };
+    const itemConf10 = { alert: { id: 'conf10', type: 'OBSTACLE', confirmationCount: 10 }, relativePosition: 'AHEAD' as const, estimatedDistanceKm: 5, alertPk: 130, driverPk: 125, ageMinutes: 10 };
+    const resT14 = this.prioritizeRelevantAlerts([itemConf1, itemConf10]);
+    results.push({
+      name: 'J-1-3-2 - T14 : Même niveau, même distance : confirmationCount 10 vs 1 -> 10 premier',
+      passed: resT14.length === 2 && resT14[0].alert.id === 'conf10' && resT14[1].alert.id === 'conf1',
+      details: `Ordre: [${resT14.map(r => r.alert.id).join(', ')}] (attendu: [conf10, conf1])`,
+    });
+
+    // T15 : liste vide -> liste vide ET tableau source non muté
+    const originalArr = [itemT06, itemT02];
+    const originalArrCopy = [...originalArr];
+    const resT15Empty = this.prioritizeRelevantAlerts([]);
+    this.prioritizeRelevantAlerts(originalArr);
+    const isUnmutated = originalArr.length === originalArrCopy.length && originalArr[0] === originalArrCopy[0] && originalArr[1] === originalArrCopy[1];
+    results.push({
+      name: 'J-1-3-2 - T15 : Liste vide gérée et immutabilité stricte du tableau source',
+      passed: resT15Empty.length === 0 && isUnmutated,
+      details: `emptyLength: ${resT15Empty.length}, unmutated: ${isUnmutated}`,
+    });
+
+    // TESTS DE ROBUSTESSE SUPPLÉMENTAIRES
+    const itemDist0 = { alert: { id: 'r-0', type: 'OBSTACLE' }, relativePosition: 'AHEAD' as const, estimatedDistanceKm: 0, alertPk: 125, driverPk: 125, ageMinutes: 10 };
+    const itemDist10 = { alert: { id: 'r-10', type: 'OBSTACLE' }, relativePosition: 'AHEAD' as const, estimatedDistanceKm: 10, alertPk: 135, driverPk: 125, ageMinutes: 10 };
+    const itemDist30 = { alert: { id: 'r-30', type: 'ACCIDENT' }, relativePosition: 'AHEAD' as const, estimatedDistanceKm: 30, alertPk: 155, driverPk: 125, ageMinutes: 10 };
+    const itemDist80 = { alert: { id: 'r-80', type: 'FORTE_PLUIE' }, relativePosition: 'AHEAD' as const, estimatedDistanceKm: 80, alertPk: 205, driverPk: 125, ageMinutes: 10 };
+    const itemTypeUnknown = { alert: { id: 'r-unk', type: 'INCONNU_XYZ' }, relativePosition: 'AHEAD' as const, estimatedDistanceKm: 5, alertPk: 130, driverPk: 125, ageMinutes: 10 };
+    const itemPosUnknown = { alert: { id: 'r-pos-unk', type: 'ACCIDENT' }, relativePosition: 'UNKNOWN' as any, estimatedDistanceKm: 5, alertPk: 130, driverPk: 125, ageMinutes: 10 };
+    const itemConfNull = { alert: { id: 'r-c-null', type: 'OBSTACLE', confirmationCount: null as any }, relativePosition: 'AHEAD' as const, estimatedDistanceKm: 5, alertPk: 130, driverPk: 125, ageMinutes: 10 };
+    const itemConfNaN = { alert: { id: 'r-c-nan', type: 'OBSTACLE', confirmationCount: NaN }, relativePosition: 'AHEAD' as const, estimatedDistanceKm: 5, alertPk: 130, driverPk: 125, ageMinutes: 10 };
+    const itemDistNaN = { alert: { id: 'r-d-nan', type: 'OBSTACLE' }, relativePosition: 'AHEAD' as const, estimatedDistanceKm: NaN, alertPk: 125, driverPk: 125, ageMinutes: 10 };
+    const resRobust = this.prioritizeRelevantAlerts([
+      itemDist0, itemDist10, itemDist30, itemDist80, itemTypeUnknown,
+      itemPosUnknown, itemConfNull, itemConfNaN, itemDistNaN,
+    ]);
+    const resSingleRobust = this.prioritizeRelevantAlerts([itemT01]);
+    results.push({
+      name: 'J-1-3-2 - ROBUSTESSE : Cas limites sans exception (dist 0/10/30/80, type/pos inconnus, conf/dist NaN, singleton)',
+      passed: resRobust.length === 9 && resSingleRobust.length === 1 && resSingleRobust[0].priorityLevel === 'CRITICAL',
+      details: `robustCount: ${resRobust.length}, singleLevel: ${resSingleRobust[0]?.priorityLevel}`,
+    });
+
+    // =========================================================================
     // SYNTHÈSE GLOBALE DES BLOCS ROUTEGUARD
     // =========================================================================
     const c5cTests = results.filter(r => r.name.includes('ÉTAPE 5C') || r.name.includes('ÉTAPE 5B'));
     const c5dTests = results.filter(r => r.name.includes('ÉTAPE 5D'));
     const c5eTests = results.filter(r => r.name.includes('ÉTAPE 5E'));
+    const cJ132Tests = results.filter(r => r.name.includes('J-1-3-2'));
 
     const is5CPassed = c5cTests.length > 0 && c5cTests.every(r => r.passed);
     const is5DPassed = c5dTests.length > 0 && c5dTests.every(r => r.passed);
     const is5EPassed = c5eTests.length > 0 && c5eTests.every(r => r.passed);
+    const isJ132Passed = cJ132Tests.length > 0 && cJ132Tests.every(r => r.passed);
 
     results.push({
       name: '5C : ' + (is5CPassed ? 'PASS' : 'FAIL'),
@@ -1748,6 +2158,11 @@ export class CorridorService {
       name: '5E : ' + (is5EPassed ? 'PASS' : 'FAIL'),
       passed: is5EPassed,
       details: `5E : ${is5EPassed ? 'PASS' : 'FAIL'} (${c5eTests.length} tests de composition validés)`,
+    });
+    results.push({
+      name: 'J-1-3-2 : ' + (isJ132Passed ? 'PASS' : 'FAIL'),
+      passed: isJ132Passed,
+      details: `J-1-3-2 : ${isJ132Passed ? 'PASS' : 'FAIL'} (${cJ132Tests.length} tests unitaires de priorisation validés)`,
     });
 
     return results;
@@ -1888,4 +2303,9 @@ export const filterRelevantAlerts = <
     maxAgeMinutes
   );
 };
+
+/**
+ * Alias de commodité pour prioritizeRelevantAlerts (Étape J-1-3-2)
+ */
+export const prioritizeAlerts = prioritizeRelevantAlerts;
 

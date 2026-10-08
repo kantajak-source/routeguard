@@ -2,9 +2,79 @@ import React, { useState, useEffect } from 'react';
 import { AlertItem, CorridorDirection } from '../../types/routeguard';
 import { voiceService } from '../../services/voiceService';
 import { locationService, LocationCoordinates } from '../../services/locationService';
-import { corridorService, CorridorPositionResult, RelevantAlertItem } from '../../services/corridorService';
+import {
+  corridorService,
+  CorridorPositionResult,
+  RelevantAlertItem,
+  PrioritizedAlertItem,
+  PriorityLevel,
+} from '../../services/corridorService';
 import { getRelevantAlertsForDriver } from '../../services/alertService';
 import { Volume2, VolumeX } from 'lucide-react';
+
+/**
+ * Retourne l'icône correspondant strictement au TYPE d'événement (Étape J-1-3-5-A)
+ */
+const getAlertIcon = (type: string): string => {
+  switch (type) {
+    case 'ACCIDENT':
+      return '🚨';
+    case 'VEHICULE_IMMOBILISE':
+      return '🚧';
+    case 'FORTE_PLUIE':
+      return '🌧️';
+    case 'OBSTACLE':
+      return '⚠️';
+    case 'RALENTISSEMENT':
+      return '🚦';
+    default:
+      return '🚦';
+  }
+};
+
+/**
+ * Normalise le nom du type d'alerte :
+ * Un accident reste affiché "ACCIDENT" (jamais "ACCIDENT GRAVE")
+ */
+const getAlertTypeName = (type: string, title?: string): string => {
+  if (type === 'ACCIDENT') return 'ACCIDENT';
+  if (type === 'VEHICULE_IMMOBILISE') return 'VÉHICULE IMMOBILISÉ';
+  if (type === 'FORTE_PLUIE') return 'FORTE PLUIE';
+  if (type === 'OBSTACLE') return 'OBSTACLE';
+  if (type === 'RALENTISSEMENT') return 'RALENTISSEMENT';
+  if (title && title.toUpperCase().includes('ACCIDENT')) return 'ACCIDENT';
+  return (title || type).replace(/_/g, ' ');
+};
+
+/**
+ * Libellé officiel français du niveau de priorité (Étape J-1-3-5-A)
+ */
+const getPriorityLabel = (level: PriorityLevel): string => {
+  switch (level) {
+    case 'CRITICAL':
+      return 'ATTENTION IMMÉDIATE';
+    case 'HIGH':
+      return 'DANGER PROCHE';
+    case 'NORMAL':
+    default:
+      return 'INFORMATION TRAJET';
+  }
+};
+
+/**
+ * Puce visuelle de priorité
+ */
+const getPriorityDot = (level: PriorityLevel): string => {
+  switch (level) {
+    case 'CRITICAL':
+      return '🔴';
+    case 'HIGH':
+      return '🟠';
+    case 'NORMAL':
+    default:
+      return '🔵';
+  }
+};
 
 interface HomeScreenProps {
   alerts: AlertItem[];
@@ -60,7 +130,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   const [driverCoords, setDriverCoords] = useState<LocationCoordinates | null>(null);
   const [isLocating, setIsLocating] = useState<boolean>(true);
   const [locationFailed, setLocationFailed] = useState<boolean>(false);
-  const [relevantAlertItems, setRelevantAlertItems] = useState<RelevantAlertItem<AlertItem>[]>([]);
+  const [relevantAlertItems, setRelevantAlertItems] = useState<PrioritizedAlertItem<AlertItem>[]>([]);
 
   // Lecture GPS ponctuelle UNIQUE au chargement de l'écran (zéro suivi continu, zéro watchPosition)
   useEffect(() => {
@@ -132,7 +202,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
           overrideNow
         );
         if (!isMounted) return;
-        setRelevantAlertItems(result.relevantAlerts || []);
+        setRelevantAlertItems((result.relevantAlerts || []) as PrioritizedAlertItem<AlertItem>[]);
       } catch (err) {
         if (!isMounted) return;
         console.warn('[HomeScreen] Erreur calcul alertes pertinentes :', err);
@@ -150,6 +220,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   // Détermination de l'alerte principale : STRICTEMENT la première alerte pertinente retournée par le moteur
   const primaryRelevantItem = relevantAlertItems[0] || null;
   const primaryAlert = primaryRelevantItem ? primaryRelevantItem.alert : null;
+  const primaryPriorityLevel: PriorityLevel = primaryRelevantItem?.priorityLevel || 'NORMAL';
 
   // Alertes secondaires pertinentes (strictement issues du moteur)
   const secondaryAlertsCount = Math.max(0, relevantAlertItems.length - 1);
@@ -272,11 +343,6 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
           </div>
         </div>
 
-        <div className="flex items-center text-[12px] text-white/85">
-          <span className="material-symbols-outlined text-[15px] mr-1 text-[#a6caf3]">near_me</span>
-          <span>Prochain arrêt : <strong className="text-white font-semibold">Bafia</strong> dans <strong className="text-amber-300 font-bold">34 km</strong></span>
-        </div>
-
         {/* Position ponctuelle estimée sur le corridor N4 (locale en mémoire, non bloquante) */}
         <div className="flex items-center justify-between text-[11px] pt-2 border-t border-white/10 text-white/90">
           <div className="flex items-center gap-1.5 font-medium">
@@ -337,35 +403,74 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
         </div>
       ) : primaryAlert ? (
         <div className="flex flex-col gap-2">
+          {/* En-tête de priorité au-dessus de la carte */}
           <div className="flex items-center justify-between px-0.5">
             <span className="text-[12px] text-[#002541] uppercase tracking-wider font-black flex items-center gap-1.5">
-              <span className="material-symbols-outlined text-[17px] text-[#d92d20]">warning</span>
-              DANGER SUR VOTRE TRAJET
+              <span className={`material-symbols-outlined text-[17px] ${
+                primaryPriorityLevel === 'CRITICAL' ? 'text-[#d92d20]' :
+                primaryPriorityLevel === 'HIGH' ? 'text-[#f28c28]' : 'text-[#123b5d]'
+              }`}>
+                {primaryPriorityLevel === 'NORMAL' ? 'info' : 'warning'}
+              </span>
+              {primaryPriorityLevel === 'CRITICAL' ? 'DANGER SUR VOTRE TRAJET' :
+               primaryPriorityLevel === 'HIGH' ? 'DANGER PROCHE SUR VOTRE TRAJET' : 'INFORMATION SUR VOTRE TRAJET'}
             </span>
-            <span className="bg-[#d92d20] text-white text-[11px] font-black tracking-wide uppercase px-2 py-0.5 rounded flex items-center gap-1 shadow-xs">
-              <span className="w-1.5 h-1.5 rounded-full bg-white animate-ping"></span>
-              URGENT
+            <span className={`text-white text-[11px] font-black tracking-wide uppercase px-2 py-0.5 rounded flex items-center gap-1 shadow-xs ${
+              primaryPriorityLevel === 'CRITICAL' ? 'bg-[#d92d20]' :
+              primaryPriorityLevel === 'HIGH' ? 'bg-[#f28c28]' : 'bg-[#123b5d]'
+            }`}>
+              {primaryPriorityLevel === 'CRITICAL' && (
+                <span className="w-1.5 h-1.5 rounded-full bg-white animate-ping"></span>
+              )}
+              {getPriorityLabel(primaryPriorityLevel)}
             </span>
           </div>
 
           <div 
             onClick={() => onViewAlertDetail(primaryAlert)}
-            className="w-full bg-white rounded-2xl shadow-md border-2 border-[#d92d20] p-4 flex flex-col gap-3.5 cursor-pointer active:bg-slate-50 transition-all"
+            className={`w-full bg-white rounded-2xl shadow-md border-2 p-4 flex flex-col gap-3.5 cursor-pointer active:bg-slate-50 transition-all ${
+              primaryPriorityLevel === 'CRITICAL' ? 'border-[#d92d20]' :
+              primaryPriorityLevel === 'HIGH' ? 'border-[#f28c28]' : 'border-[#123b5d]'
+            }`}
           >
+            {/* Ligne 1 : Type d'événement + Badge de priorité + Statut d'approche */}
             <div className="flex items-center justify-between">
-              <div className="inline-flex items-center gap-1.5 bg-[#d92d20] text-white font-black text-[14px] px-3 py-1 rounded-lg tracking-wider uppercase shadow-xs">
-                <span className="material-symbols-outlined text-[18px]">car_crash</span>
-                {primaryAlert.badgeText}
+              <div className="flex items-center gap-2 flex-wrap">
+                {/* Badge TYPE : Icône propre au type + Nom normalisé (jamais ACCIDENT GRAVE) */}
+                <div className={`inline-flex items-center gap-1.5 text-white font-black text-[13px] px-3 py-1 rounded-lg tracking-wider uppercase shadow-xs ${
+                  primaryPriorityLevel === 'CRITICAL' ? 'bg-[#d92d20]' :
+                  primaryPriorityLevel === 'HIGH' ? 'bg-[#f28c28]' : 'bg-[#123b5d]'
+                }`}>
+                  <span className="text-[16px]">{getAlertIcon(primaryAlert.type)}</span>
+                  <span>{getAlertTypeName(primaryAlert.type, primaryAlert.title)}</span>
+                </div>
+
+                {/* Badge PRIORITÉ */}
+                <div className={`inline-flex items-center gap-1 font-extrabold text-[11px] px-2 py-0.5 rounded-md uppercase tracking-wider ${
+                  primaryPriorityLevel === 'CRITICAL' ? 'bg-red-50 text-[#d92d20] border border-red-200' :
+                  primaryPriorityLevel === 'HIGH' ? 'bg-amber-50 text-[#914d00] border border-amber-200' :
+                  'bg-blue-50 text-[#123b5d] border border-blue-200'
+                }`}>
+                  <span>{getPriorityDot(primaryPriorityLevel)}</span>
+                  <span>{getPriorityLabel(primaryPriorityLevel)}</span>
+                </div>
               </div>
+
               <span className="text-[12px] text-[#42474e] font-bold flex items-center gap-1">
-                <span className="material-symbols-outlined text-[15px] text-[#d92d20]">near_me</span>
-                En approche
+                <span className={`material-symbols-outlined text-[15px] ${
+                  primaryPriorityLevel === 'CRITICAL' ? 'text-[#d92d20]' :
+                  primaryPriorityLevel === 'HIGH' ? 'text-[#f28c28]' : 'text-[#123b5d]'
+                }`}>near_me</span>
+                {primaryRelevantItem?.relativePosition === 'AT_EVENT' ? 'Sur les lieux' : 'En approche'}
               </span>
             </div>
 
-            {/* Distance & Sector */}
+            {/* Distance & Secteur */}
             <div className="flex flex-col">
-              <div className="text-[36px] font-black text-[#d92d20] leading-none tracking-tight">
+              <div className={`text-[36px] font-black leading-none tracking-tight ${
+                primaryPriorityLevel === 'CRITICAL' ? 'text-[#d92d20]' :
+                primaryPriorityLevel === 'HIGH' ? 'text-[#f28c28]' : 'text-[#002541]'
+              }`}>
                 {primaryDistanceText}
               </div>
               <div className="flex items-center gap-1 text-[#42474e] text-[13px] font-semibold mt-1.5">
@@ -374,20 +479,30 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
               </div>
             </div>
 
-            {/* Big Prominent Audio Button: ÉCOUTER L'ALERTE */}
+            {/* Bouton Audio Prominent : ÉCOUTER L'ALERTE */}
             <button
               type="button"
               onClick={handleListenAlert}
               className={`w-full min-h-[58px] rounded-xl px-4 py-2.5 flex items-center justify-between transition-all shadow-sm ${
                 isPlayingAudio 
-                  ? 'bg-[#d92d20] text-white ring-4 ring-red-200' 
-                  : 'bg-red-50 hover:bg-red-100 active:scale-[0.98] border-2 border-red-200 text-[#121c26]'
+                  ? (primaryPriorityLevel === 'CRITICAL' ? 'bg-[#d92d20] text-white ring-4 ring-red-200' :
+                     primaryPriorityLevel === 'HIGH' ? 'bg-[#f28c28] text-white ring-4 ring-amber-200' :
+                     'bg-[#123b5d] text-white ring-4 ring-blue-200')
+                  : (primaryPriorityLevel === 'CRITICAL' ? 'bg-red-50 hover:bg-red-100 active:scale-[0.98] border-2 border-red-200 text-[#121c26]' :
+                     primaryPriorityLevel === 'HIGH' ? 'bg-amber-50 hover:bg-amber-100 active:scale-[0.98] border-2 border-amber-200 text-[#121c26]' :
+                     'bg-blue-50 hover:bg-blue-100 active:scale-[0.98] border-2 border-blue-200 text-[#121c26]')
               }`}
               aria-label="Écouter l'alerte"
             >
               <div className="flex items-center gap-3">
                 <div className={`w-11 h-11 rounded-full flex items-center justify-center shrink-0 shadow-sm transition-transform ${
-                  isPlayingAudio ? 'bg-white text-[#d92d20] animate-pulse' : 'bg-[#d92d20] text-white'
+                  isPlayingAudio
+                    ? (primaryPriorityLevel === 'CRITICAL' ? 'bg-white text-[#d92d20] animate-pulse' :
+                       primaryPriorityLevel === 'HIGH' ? 'bg-white text-[#f28c28] animate-pulse' :
+                       'bg-white text-[#123b5d] animate-pulse')
+                    : (primaryPriorityLevel === 'CRITICAL' ? 'bg-[#d92d20] text-white' :
+                       primaryPriorityLevel === 'HIGH' ? 'bg-[#f28c28] text-white' :
+                       'bg-[#123b5d] text-white')
                 }`}>
                   <span className="material-symbols-outlined text-[26px]">
                     {isPlayingAudio ? 'pause' : 'play_arrow'}
@@ -400,7 +515,9 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
                     {isPlayingAudio ? "LECTURE DE L'ALERTE..." : "ÉCOUTER L'ALERTE"}
                   </span>
                   <span className={`text-[11px] font-bold flex items-center gap-1 ${
-                    isPlayingAudio ? 'text-red-100' : 'text-[#d92d20]'
+                    isPlayingAudio ? 'text-white/80' :
+                    (primaryPriorityLevel === 'CRITICAL' ? 'text-[#d92d20]' :
+                     primaryPriorityLevel === 'HIGH' ? 'text-[#b54708]' : 'text-[#123b5d]')
                   }`}>
                     <span className="material-symbols-outlined text-[14px]">graphic_eq</span>
                     Message vocal radio
@@ -410,14 +527,16 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
 
               <span className={`text-[12px] font-black px-2.5 py-0.5 rounded-full border ${
                 isPlayingAudio 
-                  ? 'bg-white text-[#d92d20] border-transparent' 
-                  : 'bg-white text-[#d92d20] border-red-200'
+                  ? 'bg-white text-[#002541] border-transparent' 
+                  : (primaryPriorityLevel === 'CRITICAL' ? 'bg-white text-[#d92d20] border-red-200' :
+                     primaryPriorityLevel === 'HIGH' ? 'bg-white text-[#914d00] border-amber-200' :
+                     'bg-white text-[#123b5d] border-blue-200')
               }`}>
                 {primaryAlert.audioDuration || '0:24'}
               </span>
             </button>
 
-            {/* Confirmation social proof */}
+            {/* Preuve sociale de confirmation */}
             <div className="flex items-center justify-between pt-1 border-t border-slate-100 text-[12px]">
               <div className="flex items-center gap-1 text-[#2e7d32] font-extrabold">
                 <span className="material-symbols-outlined text-[16px]">check_circle</span>
@@ -437,16 +556,16 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
         </div>
       )}
 
-      {/* 4. Secondary alerts link banner */}
+      {/* 4. Bandeau de lien vers les alertes secondaires */}
       {secondaryAlert && (
         <div 
           onClick={onViewAllAlerts}
           className="w-full bg-white rounded-xl px-3.5 py-2.5 border border-[#dfe9f7] shadow-xs flex items-center justify-between cursor-pointer active:bg-slate-50 transition-colors"
         >
           <div className="flex items-center gap-2">
-            <span className="material-symbols-outlined text-[#914d00] text-[20px]">traffic</span>
+            <span className="text-[16px]">{getAlertIcon(secondaryAlert.type)}</span>
             <span className="text-[13px] text-[#121c26] font-medium">
-              <strong className="text-[#914d00] font-bold">{secondaryAlertsCount} autre{secondaryAlertsCount > 1 ? 's' : ''} alerte{secondaryAlertsCount > 1 ? 's' : ''} :</strong> {secondaryAlert.title}
+              <strong className="text-[#914d00] font-bold">{secondaryAlertsCount} autre{secondaryAlertsCount > 1 ? 's' : ''} alerte{secondaryAlertsCount > 1 ? 's' : ''} :</strong> {getAlertTypeName(secondaryAlert.type, secondaryAlert.title)}
             </span>
           </div>
           <span className="text-[#914d00] text-[12px] font-extrabold flex items-center">

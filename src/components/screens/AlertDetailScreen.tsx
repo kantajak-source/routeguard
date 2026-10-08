@@ -5,6 +5,26 @@ import { authService } from '../../services/authService';
 import { DEFAULT_MAX_ALERT_AGE_MINUTES } from '../../services/corridorService';
 import { ArrowLeft, Check, AlertTriangle, Play, Pause } from 'lucide-react';
 
+/**
+ * Normalise le nom affiché du TYPE dans le badge selon alert.type (Étape J-1-3-7)
+ */
+const getAlertTypeName = (type: string): string => {
+  switch (type) {
+    case 'ACCIDENT':
+      return 'ACCIDENT';
+    case 'VEHICULE_IMMOBILISE':
+      return 'VÉHICULE IMMOBILISÉ';
+    case 'FORTE_PLUIE':
+      return 'FORTE PLUIE';
+    case 'OBSTACLE':
+      return 'OBSTACLE';
+    case 'RALENTISSEMENT':
+      return 'RALENTISSEMENT';
+    default:
+      return type ? type.replace(/_/g, ' ') : 'ÉVÉNEMENT';
+  }
+};
+
 interface AlertDetailScreenProps {
   alert: AlertItem;
   onBack: () => void;
@@ -191,7 +211,7 @@ export const AlertDetailScreen: React.FC<AlertDetailScreenProps> = ({
         {/* Badge */}
         <div className="inline-flex items-center gap-2 bg-[#d92d20] text-white px-5 py-2 rounded-full font-black text-sm uppercase tracking-wider shadow-sm">
           <span>🚨</span>
-          <span>{alert.badgeText || alert.title}</span>
+          <span>{getAlertTypeName(alert.type)}</span>
         </div>
 
         {/* Badge contextuel discret : VOTRE SIGNALEMENT */}

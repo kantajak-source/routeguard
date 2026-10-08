@@ -2,7 +2,11 @@ import React, { useState, useEffect } from 'react';
 import { AlertItem, CorridorDirection } from '../../types/routeguard';
 import { getRelevantAlertsForDriver } from '../../services/alertService';
 import { locationService, LocationCoordinates } from '../../services/locationService';
-import { RelevantAlertItem } from '../../services/corridorService';
+import {
+  RelevantAlertItem,
+  PrioritizedAlertItem,
+  PriorityLevel,
+} from '../../services/corridorService';
 import { voiceService } from '../../services/voiceService';
 import { Play, Pause } from 'lucide-react';
 
@@ -55,7 +59,7 @@ export const AlertsScreen: React.FC<AlertsScreenProps> = ({
 }) => {
   const [status, setStatus] = useState<ScreenStatus>('LOCATING');
   const [direction, setDirection] = useState<CorridorDirection>(getStoredDirection);
-  const [relevantAlertItems, setRelevantAlertItems] = useState<RelevantAlertItem<AlertItem>[]>([]);
+  const [relevantAlertItems, setRelevantAlertItems] = useState<PrioritizedAlertItem<AlertItem>[]>([]);
   const [playingAlertId, setPlayingAlertId] = useState<string | null>(null);
 
   // Capture ponctuelle unique lors du montage (aucun suivi continu, aucun polling, aucun tracking)
@@ -117,7 +121,7 @@ export const AlertsScreen: React.FC<AlertsScreenProps> = ({
         }
 
         // ÉTAT 6 / PRÊT : Alertes pertinentes disponibles (relevantAlerts uniquement)
-        setRelevantAlertItems(result.relevantAlerts);
+        setRelevantAlertItems(result.relevantAlerts as PrioritizedAlertItem<AlertItem>[]);
         setStatus('READY');
       } catch (err: any) {
         if (!isMounted) return;
@@ -181,16 +185,54 @@ export const AlertsScreen: React.FC<AlertsScreenProps> = ({
     }
   };
 
-  const getSeverityBorder = (severity: string) => {
-    if (severity === 'CRITIQUE') return 'border-l-4 border-l-[#d92d20] border-red-100';
-    if (severity === 'PRUDENCE') return 'border-l-4 border-l-[#f28c28] border-orange-100';
+  /**
+   * Normalise le nom du type d'alerte :
+   * Un accident reste affiché "ACCIDENT" (jamais "ACCIDENT GRAVE")
+   */
+  const getAlertTypeName = (type: string, title?: string): string => {
+    if (type === 'ACCIDENT') return 'ACCIDENT';
+    if (type === 'VEHICULE_IMMOBILISE') return 'VÉHICULE IMMOBILISÉ';
+    if (type === 'FORTE_PLUIE') return 'FORTE PLUIE';
+    if (type === 'OBSTACLE') return 'OBSTACLE';
+    if (type === 'RALENTISSEMENT') return 'RALENTISSEMENT';
+    if (title && title.toUpperCase().includes('ACCIDENT')) return 'ACCIDENT';
+    return (title || type).replace(/_/g, ' ');
+  };
+
+  /**
+   * Bordure gauche de la carte selon le niveau de priorité (Étape J-1-3-5-A)
+   */
+  const getPriorityBorder = (level: PriorityLevel) => {
+    if (level === 'CRITICAL') return 'border-l-4 border-l-[#d92d20] border-red-100';
+    if (level === 'HIGH') return 'border-l-4 border-l-[#f28c28] border-orange-100';
     return 'border-l-4 border-l-[#123b5d] border-blue-100';
   };
 
-  const getBadgeColor = (severity: string) => {
-    if (severity === 'CRITIQUE') return 'text-[#d92d20] bg-red-50';
-    if (severity === 'PRUDENCE') return 'text-[#914d00] bg-amber-50';
-    return 'text-[#123b5d] bg-blue-50';
+  /**
+   * Couleur du badge de priorité (Étape J-1-3-5-A)
+   */
+  const getPriorityBadgeColor = (level: PriorityLevel) => {
+    if (level === 'CRITICAL') return 'text-[#d92d20] bg-red-50 border border-red-200';
+    if (level === 'HIGH') return 'text-[#914d00] bg-amber-50 border border-amber-200';
+    return 'text-[#123b5d] bg-blue-50 border border-blue-200';
+  };
+
+  /**
+   * Libellé officiel français du niveau de priorité (Étape J-1-3-5-A)
+   */
+  const getPriorityLabel = (level: PriorityLevel): string => {
+    if (level === 'CRITICAL') return 'ATTENTION IMMÉDIATE';
+    if (level === 'HIGH') return 'DANGER PROCHE';
+    return 'INFORMATION TRAJET';
+  };
+
+  /**
+   * Puce visuelle de priorité
+   */
+  const getPriorityDot = (level: PriorityLevel): string => {
+    if (level === 'CRITICAL') return '🔴';
+    if (level === 'HIGH') return '🟠';
+    return '🔵';
   };
 
   const formatDistance = (distKm: number): string => {
@@ -337,6 +379,7 @@ export const AlertsScreen: React.FC<AlertsScreenProps> = ({
       <div className="flex flex-col space-y-3.5">
         {relevantAlertItems.map((item) => {
           const alert = item.alert;
+          const priorityLevel: PriorityLevel = item.priorityLevel || 'NORMAL';
           const isPlaying = playingAlertId === alert.id;
           const hasAudio = Boolean(alert.audioTranscript || alert.audioUrl);
 
@@ -344,13 +387,22 @@ export const AlertsScreen: React.FC<AlertsScreenProps> = ({
             <article
               key={alert.id}
               onClick={() => onSelectAlert?.(alert)}
-              className={`relative bg-white rounded-2xl shadow-sm border p-4 flex flex-col gap-3 transition-all cursor-pointer active:bg-slate-50 ${getSeverityBorder(alert.severity)}`}
+              className={`relative bg-white rounded-2xl shadow-sm border p-4 flex flex-col gap-3 transition-all cursor-pointer active:bg-slate-50 ${getPriorityBorder(priorityLevel)}`}
             >
-              {/* Type d'alerte et horodatage */}
+              {/* Type d'alerte, Priorité et horodatage */}
               <div className="flex items-center justify-between">
-                <div className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg font-black text-xs uppercase tracking-wide ${getBadgeColor(alert.severity)}`}>
-                  <span className="text-base">{getAlertIcon(alert.type)}</span>
-                  <span>{alert.title}</span>
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  {/* TYPE : Icône + Nom du type (jamais ACCIDENT GRAVE) */}
+                  <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg font-black text-xs uppercase tracking-wide bg-slate-100 text-[#002541]">
+                    <span className="text-base">{getAlertIcon(alert.type)}</span>
+                    <span>{getAlertTypeName(alert.type, alert.title)}</span>
+                  </div>
+
+                  {/* PRIORITÉ : Puce + Libellé de priorité */}
+                  <div className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md font-extrabold text-[11px] uppercase tracking-wider ${getPriorityBadgeColor(priorityLevel)}`}>
+                    <span>{getPriorityDot(priorityLevel)}</span>
+                    <span>{getPriorityLabel(priorityLevel)}</span>
+                  </div>
                 </div>
                 <span className="text-xs text-[#5a6573] font-medium">{alert.timeAgo}</span>
               </div>
@@ -359,7 +411,8 @@ export const AlertsScreen: React.FC<AlertsScreenProps> = ({
               <div className="flex items-baseline justify-between pt-0.5">
                 <div>
                   <div className={`text-[22px] font-black tracking-tight leading-tight ${
-                    alert.severity === 'CRITIQUE' ? 'text-[#d92d20]' : 'text-[#002541]'
+                    priorityLevel === 'CRITICAL' ? 'text-[#d92d20]' :
+                    priorityLevel === 'HIGH' ? 'text-[#f28c28]' : 'text-[#002541]'
                   }`}>
                     {formatDistance(item.estimatedDistanceKm)}
                   </div>
