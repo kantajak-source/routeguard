@@ -1,8 +1,17 @@
 import { AlertItem } from '../types/routeguard';
 
-export const INITIAL_ALERTS: AlertItem[] = [
+/**
+ * Données de démonstration et d'essais contrôlés uniquement (Étape J-1-3-8-C).
+ * PRINCIPE ABSOLU : Ne jamais injecter dans le flux opérationnel ni présenter comme un danger réel.
+ */
+export interface DemoAlertItem extends AlertItem {
+  isDemo?: boolean;
+}
+
+export const INITIAL_ALERTS: DemoAlertItem[] = [
   {
     id: 'alert-1',
+    isDemo: true,
     type: 'ACCIDENT',
     severity: 'CRITIQUE',
     title: 'ACCIDENT',
@@ -27,6 +36,7 @@ export const INITIAL_ALERTS: AlertItem[] = [
   },
   {
     id: 'alert-2',
+    isDemo: true,
     type: 'VEHICULE_IMMOBILISE',
     severity: 'PRUDENCE',
     title: 'VÉHICULE IMMOBILISÉ',
@@ -51,6 +61,7 @@ export const INITIAL_ALERTS: AlertItem[] = [
   },
   {
     id: 'alert-3',
+    isDemo: true,
     type: 'FORTE_PLUIE',
     severity: 'INFO',
     title: 'FORTE PLUIE',

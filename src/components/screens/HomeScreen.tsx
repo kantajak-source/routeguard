@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { AlertItem, CorridorDirection } from '../../types/routeguard';
 import { voiceService } from '../../services/voiceService';
 import { locationService, LocationCoordinates } from '../../services/locationService';
@@ -11,6 +11,7 @@ import {
 } from '../../services/corridorService';
 import { getRelevantAlertsForDriver } from '../../services/alertService';
 import { Volume2, VolumeX } from 'lucide-react';
+import { AlertDetailContext } from './AlertDetailScreen';
 
 /**
  * Retourne l'icône correspondant strictement au TYPE d'événement (Étape J-1-3-5-A)
@@ -79,7 +80,7 @@ const getPriorityDot = (level: PriorityLevel): string => {
 interface HomeScreenProps {
   alerts: AlertItem[];
   onStartReport: () => void;
-  onViewAlertDetail: (alert: AlertItem) => void;
+  onViewAlertDetail: (alert: AlertItem, context?: AlertDetailContext) => void;
   onViewAllAlerts: () => void;
   isAudioMuted: boolean;
   activeDriver?: string;
@@ -130,59 +131,82 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   const [driverCoords, setDriverCoords] = useState<LocationCoordinates | null>(null);
   const [isLocating, setIsLocating] = useState<boolean>(true);
   const [locationFailed, setLocationFailed] = useState<boolean>(false);
+  const [locationErrorMsg, setLocationErrorMsg] = useState<string | null>(null);
   const [relevantAlertItems, setRelevantAlertItems] = useState<PrioritizedAlertItem<AlertItem>[]>([]);
 
-  // Lecture GPS ponctuelle UNIQUE au chargement de l'écran (zéro suivi continu, zéro watchPosition)
-  useEffect(() => {
-    let isMounted = true;
+  // Verrous et références de cycle de vie contre les accès concurrents et démontages
+  const isLocatingRef = useRef<boolean>(false);
+  const isMountedRef = useRef<boolean>(true);
 
-    const fetchSingleLocation = async () => {
-      try {
-        setIsLocating(true);
-        // Lecture ponctuelle non-bloquante avec timeout de 5s
-        const coords = overrideCoordinates !== undefined
-          ? overrideCoordinates
-          : await locationService.getCurrentLocation(5000);
+  // Fonction de capture GPS ponctuelle (initiale automatique ou réessai manuel)
+  const requestLocation = useCallback(async (isManualRetry: boolean = false) => {
+    // Verrou fiable contre les appels concurrents
+    if (isLocatingRef.current) {
+      return;
+    }
+    isLocatingRef.current = true;
+    setIsLocating(true);
+    setLocationFailed(false);
+    setLocationErrorMsg(null);
 
-        if (!isMounted) return;
+    try {
+      // Lecture ponctuelle non-bloquante avec diagnostic typé (délai par défaut 7000ms du service)
+      const result = overrideCoordinates !== undefined
+        ? {
+            location: overrideCoordinates,
+            errorReason: null,
+            errorMessage: null,
+          }
+        : await locationService.getCurrentLocationDetailed();
 
-        if (
-          coords &&
-          typeof coords.latitude === 'number' &&
-          typeof coords.longitude === 'number' &&
-          !isNaN(coords.latitude) &&
-          !isNaN(coords.longitude)
-        ) {
-          const result = corridorService.getCorridorPosition(coords.latitude, coords.longitude);
-          setCorridorPosition(result);
-          setDriverCoords(coords);
-          setLocationFailed(false);
-        } else {
-          setCorridorPosition(null);
-          setDriverCoords(null);
-          setLocationFailed(true);
-          setRelevantAlertItems([]);
-        }
-      } catch (err) {
-        if (!isMounted) return;
-        console.warn('[HomeScreen] Erreur capture GPS ponctuelle :', err);
+      if (!isMountedRef.current) return;
+
+      const coords = result.location;
+
+      if (
+        coords &&
+        typeof coords.latitude === 'number' &&
+        typeof coords.longitude === 'number' &&
+        !isNaN(coords.latitude) &&
+        !isNaN(coords.longitude)
+      ) {
+        const corridorRes = corridorService.getCorridorPosition(coords.latitude, coords.longitude);
+        setCorridorPosition(corridorRes);
+        setDriverCoords(coords);
+        setLocationFailed(false);
+        setLocationErrorMsg(null);
+      } else {
         setCorridorPosition(null);
         setDriverCoords(null);
         setLocationFailed(true);
+        setLocationErrorMsg(result.errorMessage || 'Position GPS indisponible');
         setRelevantAlertItems([]);
-      } finally {
-        if (isMounted) {
-          setIsLocating(false);
-        }
       }
-    };
+    } catch (err: any) {
+      if (!isMountedRef.current) return;
+      console.warn('[HomeScreen] Erreur capture GPS ponctuelle :', err);
+      setCorridorPosition(null);
+      setDriverCoords(null);
+      setLocationFailed(true);
+      setLocationErrorMsg('Erreur inattendue lors de la capture de position GPS');
+      setRelevantAlertItems([]);
+    } finally {
+      isLocatingRef.current = false;
+      if (isMountedRef.current) {
+        setIsLocating(false);
+      }
+    }
+  }, [overrideCoordinates]);
 
-    fetchSingleLocation();
+  // Lecture GPS ponctuelle UNIQUE au chargement de l'écran (zéro suivi continu, zéro watchPosition)
+  useEffect(() => {
+    isMountedRef.current = true;
+    requestLocation(false);
 
     return () => {
-      isMounted = false;
+      isMountedRef.current = false;
     };
-  }, [overrideCoordinates]);
+  }, [requestLocation]);
 
   // Calcul local de la pertinence des alertes via le moteur partagé getRelevantAlertsForDriver()
   useEffect(() => {
@@ -361,7 +385,17 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
                 </span>
               )
             ) : (
-              <span className="text-white/60">Position GPS indisponible</span>
+              <div className="flex items-center gap-2">
+                <span className="text-white/60">Position GPS indisponible</span>
+                <button
+                  type="button"
+                  onClick={() => requestLocation(true)}
+                  disabled={isLocating}
+                  className="px-2 py-0.5 bg-white/20 hover:bg-white/30 active:bg-white/40 text-white text-[10px] font-bold rounded cursor-pointer transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Réessayer
+                </button>
+              </div>
             )}
           </div>
           {corridorPosition?.isOnCorridor && corridorPosition.estimatedPk !== null && (
@@ -387,9 +421,21 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
             <span className="material-symbols-outlined text-[28px]">location_off</span>
           </div>
           <h3 className="font-extrabold text-[16px] text-[#002541]">Localisation GPS indisponible</h3>
-          <p className="text-xs text-[#5a6573] mt-1">
-            Activez la géolocalisation pour déterminer la pertinence des alertes sur votre axe.
+          <p className="text-xs text-[#5a6573] mt-1 max-w-sm mx-auto">
+            {locationErrorMsg || 'Activez la géolocalisation pour déterminer la pertinence des alertes sur votre axe.'}
           </p>
+          <div className="mt-4 pt-3 border-t border-slate-100 flex flex-col items-center">
+            <button
+              type="button"
+              onClick={() => requestLocation(true)}
+              disabled={isLocating}
+              className="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-[#002541] hover:bg-[#123b5d] active:bg-[#00182b] text-white text-xs font-bold rounded-xl shadow-xs transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <span className="material-symbols-outlined text-[18px]">refresh</span>
+              <span>Réessayer le GPS</span>
+            </button>
+            <span className="text-[10px] text-[#5a6573] mt-1.5">Capture ponctuelle unique sans suivi continu</span>
+          </div>
         </div>
       ) : corridorPosition && !corridorPosition.isOnCorridor ? (
         <div className="w-full bg-white rounded-2xl p-6 text-center shadow-sm border border-amber-200">
@@ -427,7 +473,21 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
           </div>
 
           <div 
-            onClick={() => onViewAlertDetail(primaryAlert)}
+            onClick={() => {
+              if (!primaryAlert) return;
+              const context: AlertDetailContext | undefined = primaryRelevantItem
+                ? {
+                    estimatedDistanceKm: primaryRelevantItem.estimatedDistanceKm,
+                    relativePosition: primaryRelevantItem.relativePosition,
+                    priorityLevel: primaryPriorityLevel,
+                    priorityScore: primaryRelevantItem.priorityScore,
+                    priorityReason: primaryRelevantItem.priorityReason,
+                    alertPk: primaryRelevantItem.alertPk,
+                    driverPk: primaryRelevantItem.driverPk,
+                  }
+                : undefined;
+              onViewAlertDetail(primaryAlert, context);
+            }}
             className={`w-full bg-white rounded-2xl shadow-md border-2 p-4 flex flex-col gap-3.5 cursor-pointer active:bg-slate-50 transition-all ${
               primaryPriorityLevel === 'CRITICAL' ? 'border-[#d92d20]' :
               primaryPriorityLevel === 'HIGH' ? 'border-[#f28c28]' : 'border-[#123b5d]'
@@ -549,10 +609,20 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
       ) : (
         <div className="w-full bg-white rounded-2xl p-6 text-center shadow-sm border border-emerald-200">
           <div className="w-12 h-12 rounded-full bg-emerald-100 text-[#2e7d32] flex items-center justify-center mx-auto mb-2">
-            <span className="material-symbols-outlined text-[28px]">check_circle</span>
+            <span className="material-symbols-outlined text-[28px]">
+              {typeof navigator !== 'undefined' && !navigator.onLine ? 'cloud_off' : 'check_circle'}
+            </span>
           </div>
-          <h3 className="font-extrabold text-[17px] text-[#002541]">Voie dégagée pour l’instant</h3>
-          <p className="text-xs text-[#5a6573] mt-1">Aucun danger critique signalé sur les 30 prochains kilomètres.</p>
+          <h3 className="font-extrabold text-[17px] text-[#002541]">
+            {typeof navigator !== 'undefined' && !navigator.onLine
+              ? 'Mode hors-ligne'
+              : 'Aucune alerte pertinente disponible pour le moment'}
+          </h3>
+          <p className="text-xs text-[#5a6573] mt-1">
+            {typeof navigator !== 'undefined' && !navigator.onLine
+              ? 'Connexion réseau indisponible. Impossible d’actualiser les alertes en direct.'
+              : 'Aucun événement signalé sur votre corridor.'}
+          </p>
         </div>
       )}
 

@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { AlertItem } from '../../types/routeguard';
 import { voiceService } from '../../services/voiceService';
 import { authService } from '../../services/authService';
-import { DEFAULT_MAX_ALERT_AGE_MINUTES } from '../../services/corridorService';
+import { DEFAULT_MAX_ALERT_AGE_MINUTES, PriorityLevel } from '../../services/corridorService';
 import { ArrowLeft, Check, AlertTriangle, Play, Pause } from 'lucide-react';
 
 /**
@@ -25,8 +25,170 @@ const getAlertTypeName = (type: string): string => {
   }
 };
 
+/**
+ * Retourne l'icône correspondant strictement au TYPE d'événement
+ */
+const getAlertIcon = (type: string): string => {
+  switch (type) {
+    case 'ACCIDENT':
+      return '🚨';
+    case 'VEHICULE_IMMOBILISE':
+      return '🚧';
+    case 'FORTE_PLUIE':
+      return '🌧️';
+    case 'OBSTACLE':
+      return '⚠️';
+    case 'RALENTISSEMENT':
+      return '🚦';
+    default:
+      return '🚨';
+  }
+};
+
+/**
+ * Libellé officiel français du niveau de priorité (Étape J-1-3-8-A2)
+ */
+export const getPriorityLabel = (level: PriorityLevel): string => {
+  switch (level) {
+    case 'CRITICAL':
+      return 'ATTENTION IMMÉDIATE';
+    case 'HIGH':
+      return 'DANGER PROCHE';
+    case 'NORMAL':
+    default:
+      return 'INFORMATION TRAJET';
+  }
+};
+
+/**
+ * Puce visuelle de priorité
+ */
+export const getPriorityDot = (level: PriorityLevel): string => {
+  switch (level) {
+    case 'CRITICAL':
+      return '🔴';
+    case 'HIGH':
+      return '🟠';
+    case 'NORMAL':
+    default:
+      return '🔵';
+  }
+};
+
+/**
+ * Style visuel du badge de priorité
+ */
+export const getPriorityBadgeStyle = (level: PriorityLevel): string => {
+  switch (level) {
+    case 'CRITICAL':
+      return 'bg-red-50 text-[#d92d20] border border-red-200';
+    case 'HIGH':
+      return 'bg-amber-50 text-[#914d00] border border-amber-200';
+    case 'NORMAL':
+    default:
+      return 'bg-blue-50 text-[#123b5d] border border-blue-200';
+  }
+};
+
+/**
+ * Couleur du texte de distance selon le niveau de priorité
+ */
+export const getDistanceTextColor = (level?: PriorityLevel | null): string => {
+  switch (level) {
+    case 'CRITICAL':
+      return 'text-[#d92d20]';
+    case 'HIGH':
+      return 'text-[#f28c28]';
+    case 'NORMAL':
+      return 'text-[#002541]';
+    default:
+      return 'text-[#002541]';
+  }
+};
+
+/**
+ * Contexte opérationnel de l'alerte calculé par le moteur de pertinence et priorisation
+ * (Étape J-1-3-8-A2).
+ */
+export interface AlertDetailContext {
+  estimatedDistanceKm: number;
+  relativePosition: 'AHEAD' | 'AT_EVENT';
+  priorityLevel: PriorityLevel;
+  priorityScore?: number;
+  priorityReason?: string;
+  alertPk?: number;
+  driverPk?: number;
+}
+
+/**
+ * Extension locale minimale du type AlertItem pour supporter estimatedDistanceKm
+ * et relativePosition sans modifier types/routeguard.ts (Étape J-1-3-8-A).
+ */
+export interface ExtendedAlertItem extends AlertItem {
+  estimatedDistanceKm?: number | null;
+  relativePosition?: 'AHEAD' | 'AT_EVENT' | 'BEHIND' | string | null;
+}
+
+/**
+ * Calcule l'affichage harmonisé de la distance pour l'écran de détail (Étape J-1-3-8-A2).
+ * Règle :
+ * - Si le contexte contient estimatedDistanceKm (nombre fini >= 0) :
+ *     - relativePosition === 'AT_EVENT' -> "Sur votre position" (headline: "Sur votre position", subtitle: null)
+ *     - distance < 1 km (sans position AT_EVENT) -> "À moins d'1 km"
+ *     - distance >= 1 km -> "À X km" avec X = Math.round(distance)
+ *     - sous-titre "Devant vous" uniquement si relativePosition === 'AHEAD'
+ * - Si le contexte est absent ou invalide :
+ *     - Fallback historique préservé : alert.distanceKm, alert.distanceText, alert.location/sector.
+ *     - Ne jamais afficher 0 km.
+ *     - Ne jamais déduire AT_EVENT de la seule valeur zéro.
+ *     - Ne jamais afficher « devant vous » sans preuve directionnelle explicite.
+ */
+export const getDetailDistanceDisplay = (
+  alert: ExtendedAlertItem | AlertItem,
+  context?: AlertDetailContext | null
+): { headline: string; subtitle: string | null } => {
+  // 1. Contexte prioritaire transmis depuis le moteur
+  const estimatedDist = context?.estimatedDistanceKm ?? (alert as ExtendedAlertItem).estimatedDistanceKm;
+  const relPos = context?.relativePosition ?? (alert as ExtendedAlertItem).relativePosition;
+
+  const hasValidEstimated =
+    typeof estimatedDist === 'number' && !isNaN(estimatedDist) && isFinite(estimatedDist) && estimatedDist >= 0;
+
+  if (hasValidEstimated) {
+    if (relPos === 'AT_EVENT') {
+      return {
+        headline: 'Sur votre position',
+        subtitle: null,
+      };
+    }
+
+    const headline = estimatedDist < 1 ? "À moins d'1 km" : `À ${Math.round(estimatedDist)} km`;
+    const subtitle = relPos === 'AHEAD' ? 'Devant vous' : null;
+
+    return { headline, subtitle };
+  }
+
+  // 2. Fallback historique sécurisé (contexte absent ou invalide)
+  const rawDistKm = alert.distanceKm;
+  if (typeof rawDistKm === 'number' && !isNaN(rawDistKm) && isFinite(rawDistKm) && rawDistKm > 0) {
+    return {
+      headline: `${rawDistKm} KM`,
+      subtitle: null,
+    };
+  }
+
+  const locationFallback =
+    alert.distanceText || alert.location || alert.sector || 'SUR VOTRE CORRIDOR';
+
+  return {
+    headline: locationFallback,
+    subtitle: null,
+  };
+};
+
 interface AlertDetailScreenProps {
-  alert: AlertItem;
+  alert: ExtendedAlertItem | AlertItem;
+  context?: AlertDetailContext | null;
   onBack: () => void;
   onConfirmAlert: (alertId: string) => void;
   isAudioMuted: boolean;
@@ -36,6 +198,7 @@ interface AlertDetailScreenProps {
 
 export const AlertDetailScreen: React.FC<AlertDetailScreenProps> = ({
   alert,
+  context,
   onBack,
   onConfirmAlert,
   isAudioMuted,
@@ -113,6 +276,9 @@ export const AlertDetailScreen: React.FC<AlertDetailScreenProps> = ({
 
   // Compute live confirmation state for current driver
   const isConfirmed = Boolean(alert.userConfirmed || hasConfirmed);
+
+  // Calcul harmonisé de l'affichage de distance (Étape J-1-3-8-A2)
+  const distanceDisplay = getDetailDistanceDisplay(alert, context);
 
   // -------------------------------------------------------------
   // ACTION 1 : ÉCOUTER L'ALERTE (Strictly audio playback ONLY)
@@ -208,10 +374,21 @@ export const AlertDetailScreen: React.FC<AlertDetailScreenProps> = ({
 
       {/* Main Alert Headline Area */}
       <div className="flex flex-col items-center text-center mt-3 gap-3">
-        {/* Badge */}
-        <div className="inline-flex items-center gap-2 bg-[#d92d20] text-white px-5 py-2 rounded-full font-black text-sm uppercase tracking-wider shadow-sm">
-          <span>🚨</span>
-          <span>{getAlertTypeName(alert.type)}</span>
+        {/* Badges container : TYPE + PRIORITÉ (Étape J-1-3-8-A2) */}
+        <div className="flex items-center gap-2 flex-wrap justify-center">
+          {/* Badge TYPE */}
+          <div className="inline-flex items-center gap-2 bg-[#d92d20] text-white px-4 py-1.5 rounded-full font-black text-sm uppercase tracking-wider shadow-sm">
+            <span>{getAlertIcon(alert.type)}</span>
+            <span>{getAlertTypeName(alert.type)}</span>
+          </div>
+
+          {/* Badge PRIORITÉ : uniquement si le contexte contient priorityLevel */}
+          {context?.priorityLevel && (
+            <div className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full font-extrabold text-xs uppercase tracking-wider ${getPriorityBadgeStyle(context.priorityLevel)}`}>
+              <span>{getPriorityDot(context.priorityLevel)}</span>
+              <span>{getPriorityLabel(context.priorityLevel)}</span>
+            </div>
+          )}
         </div>
 
         {/* Badge contextuel discret : VOTRE SIGNALEMENT */}
@@ -222,14 +399,16 @@ export const AlertDetailScreen: React.FC<AlertDetailScreenProps> = ({
           </div>
         )}
 
-        {/* Distance & Location */}
+        {/* Distance & Location (Harmonisé J-1-3-8-A2) */}
         <div className="flex flex-col items-center mt-1">
-          <div className="font-black text-[40px] text-[#d92d20] leading-none tracking-tight uppercase">
-            {alert.distanceKm ? `${alert.distanceKm} KM` : alert.location || alert.sector || alert.distanceText}
+          <div className={`font-black text-[38px] leading-none tracking-tight ${getDistanceTextColor(context?.priorityLevel)}`}>
+            {distanceDisplay.headline}
           </div>
-          <div className="font-black text-[20px] text-[#d92d20] tracking-wide mt-1">
-            {alert.distanceKm ? 'DEVANT VOUS' : 'SUR VOTRE CORRIDOR'}
-          </div>
+          {distanceDisplay.subtitle && (
+            <div className={`font-black text-[20px] tracking-wide mt-1 uppercase ${getDistanceTextColor(context?.priorityLevel)}`}>
+              {distanceDisplay.subtitle}
+            </div>
+          )}
         </div>
 
         {/* Direction */}
@@ -364,7 +543,9 @@ export const AlertDetailScreen: React.FC<AlertDetailScreenProps> = ({
             <div className="flex flex-col p-2.5 rounded-xl bg-slate-50 border border-slate-100">
               <span className="text-[10px] text-slate-400 font-bold uppercase">Secteur couvert</span>
               <span className="font-bold text-[#002541] truncate mt-0.5">
-                {typeof (alert as any).estimatedPk === 'number' ? `PK ${(alert as any).estimatedPk} • ` : ''}
+                {typeof context?.alertPk === 'number'
+                  ? `PK ${context.alertPk} • `
+                  : (typeof (alert as any).estimatedPk === 'number' ? `PK ${(alert as any).estimatedPk} • ` : '')}
                 {alert.location || alert.sector || 'Corridor N4'}
               </span>
             </div>

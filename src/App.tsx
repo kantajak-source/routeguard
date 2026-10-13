@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { User } from 'firebase/auth';
 import { ActiveScreen, AlertItem } from './types/routeguard';
-import { INITIAL_ALERTS } from './data/initialAlerts';
 import { alertService } from './services/alertService';
 import { authService } from './services/authService';
 import { outboxSyncService } from './services/outboxSyncService';
@@ -10,14 +9,15 @@ import { BottomNav } from './components/BottomNav';
 import { HomeScreen } from './components/screens/HomeScreen';
 import { ReportFlowScreen } from './components/screens/ReportFlowScreen';
 import { AlertsScreen } from './components/screens/AlertsScreen';
-import { AlertDetailScreen } from './components/screens/AlertDetailScreen';
+import { AlertDetailScreen, AlertDetailContext } from './components/screens/AlertDetailScreen';
 import { ProfileScreen } from './components/screens/ProfileScreen';
 import { AuthScreen } from './components/screens/AuthScreen';
 
 export default function App() {
   const [activeScreen, setActiveScreen] = useState<ActiveScreen>('accueil');
-  const [alerts, setAlerts] = useState<AlertItem[]>(INITIAL_ALERTS);
+  const [alerts, setAlerts] = useState<AlertItem[]>([]);
   const [selectedAlertId, setSelectedAlertId] = useState<string | null>(null);
+  const [selectedAlertContext, setSelectedAlertContext] = useState<AlertDetailContext | null>(null);
   const [detailReturnScreen, setDetailReturnScreen] = useState<ActiveScreen>('alertes');
   const [isAudioMuted, setIsAudioMuted] = useState<boolean>(false);
   const [isDeviceFrame, setIsDeviceFrame] = useState<boolean>(true);
@@ -109,6 +109,7 @@ export default function App() {
   // When an alert is confirmed by human and published
   const handleAlertPublished = (newAlert: AlertItem) => {
     setSelectedAlertId(newAlert.id);
+    setSelectedAlertContext(null);
   };
 
   // When returning home after sending alert
@@ -117,17 +118,23 @@ export default function App() {
     setActiveScreen('accueil');
   };
 
-  // View specific alert detail with contextual return screen
-  const handleViewAlertDetail = (alert: AlertItem, returnScreen: ActiveScreen = 'alertes') => {
+  // View specific alert detail with contextual return screen and optional geographic/priority context
+  const handleViewAlertDetail = (
+    alert: AlertItem,
+    context?: AlertDetailContext | null,
+    returnScreen: ActiveScreen = 'alertes'
+  ) => {
     setDetailReturnScreen(returnScreen);
     setSelectedAlertId(alert.id);
+    setSelectedAlertContext(context ?? null);
     setActiveScreen('alerte_detail');
   };
 
-  // View specific alert detail from driver contributions profile
+  // View specific alert detail from driver contributions profile (no context available)
   const handleViewAlertDetailFromProfile = (alert: AlertItem) => {
     setDetailReturnScreen('profil');
     setSelectedAlertId(alert.id);
+    setSelectedAlertContext(null);
     setActiveScreen('alerte_detail');
   };
 
@@ -180,7 +187,7 @@ export default function App() {
             <HomeScreen
               alerts={alerts}
               onStartReport={handleStartReport}
-              onViewAlertDetail={(alert) => handleViewAlertDetail(alert, 'accueil')}
+              onViewAlertDetail={(alert, context) => handleViewAlertDetail(alert, context, 'accueil')}
               onViewAllAlerts={() => handleNavigate('alertes')}
               isAudioMuted={isAudioMuted}
               activeDriver={activeDriver}
@@ -201,7 +208,7 @@ export default function App() {
 
           {activeScreen === 'alertes' && (
             <AlertsScreen
-              onSelectAlert={(alert) => handleViewAlertDetail(alert, 'alertes')}
+              onSelectAlert={(alert, context) => handleViewAlertDetail(alert, context, 'alertes')}
               isAudioMuted={isAudioMuted}
             />
           )}
@@ -209,6 +216,7 @@ export default function App() {
           {activeScreen === 'alerte_detail' && selectedAlert && (
             <AlertDetailScreen
               alert={selectedAlert}
+              context={selectedAlertContext}
               onBack={() => handleNavigate(detailReturnScreen)}
               onConfirmAlert={handleConfirmAlert}
               isAudioMuted={isAudioMuted}

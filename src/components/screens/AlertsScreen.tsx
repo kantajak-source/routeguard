@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { AlertItem, CorridorDirection } from '../../types/routeguard';
 import { getRelevantAlertsForDriver } from '../../services/alertService';
 import { locationService, LocationCoordinates } from '../../services/locationService';
@@ -9,9 +9,10 @@ import {
 } from '../../services/corridorService';
 import { voiceService } from '../../services/voiceService';
 import { Play, Pause } from 'lucide-react';
+import { AlertDetailContext } from './AlertDetailScreen';
 
 export interface AlertsScreenProps {
-  onSelectAlert?: (alert: AlertItem) => void;
+  onSelectAlert?: (alert: AlertItem, context?: AlertDetailContext) => void;
   isAudioMuted?: boolean;
   /** Pour injection optionnelle en tests ou débogage */
   overrideCoordinates?: LocationCoordinates | null;
@@ -24,6 +25,13 @@ export interface AlertsScreenProps {
  */
 const getCurrentLocation = (timeoutMs?: number): Promise<LocationCoordinates | null> => {
   return locationService.getCurrentLocation(timeoutMs);
+};
+
+/**
+ * Fonction autonome appelant la capture ponctuelle détaillée du service de géolocalisation
+ */
+const getCurrentLocationDetailed = (timeoutMs?: number) => {
+  return locationService.getCurrentLocationDetailed(timeoutMs);
 };
 
 /**
@@ -58,85 +66,103 @@ export const AlertsScreen: React.FC<AlertsScreenProps> = ({
   overrideNow,
 }) => {
   const [status, setStatus] = useState<ScreenStatus>('LOCATING');
+  const [gpsErrorMsg, setGpsErrorMsg] = useState<string | null>(null);
   const [direction, setDirection] = useState<CorridorDirection>(getStoredDirection);
   const [relevantAlertItems, setRelevantAlertItems] = useState<PrioritizedAlertItem<AlertItem>[]>([]);
   const [playingAlertId, setPlayingAlertId] = useState<string | null>(null);
 
+  // Verrous et cycle de vie contre accès concurrents et démontages
+  const isLocatingRef = useRef<boolean>(false);
+  const isMountedRef = useRef<boolean>(true);
+
+  const loadAlerts = useCallback(async (isManualRetry: boolean = false) => {
+    // Verrou fiable contre les appels concurrents
+    if (isLocatingRef.current) {
+      return;
+    }
+    isLocatingRef.current = true;
+    setStatus('LOCATING');
+    setGpsErrorMsg(null);
+
+    try {
+      // 1. Obtenir la position GPS ponctuelle avec diagnostic typé
+      const detailedResult = overrideCoordinates !== undefined
+        ? {
+            location: overrideCoordinates,
+            errorReason: null,
+            errorMessage: null,
+          }
+        : await getCurrentLocationDetailed(7000);
+
+      if (!isMountedRef.current) return;
+
+      const coords = detailedResult.location;
+
+      // ÉTAT 2 : Si GPS refusé ou indisponible -> état explicite sans inventer de coordonnées
+      if (
+        !coords ||
+        typeof coords.latitude !== 'number' ||
+        typeof coords.longitude !== 'number' ||
+        isNaN(coords.latitude) ||
+        isNaN(coords.longitude)
+      ) {
+        setGpsErrorMsg(detailedResult.errorMessage || 'Position GPS indisponible');
+        setStatus('GPS_UNAVAILABLE');
+        return;
+      }
+
+      // 2. Déterminer la direction mémorisée
+      const currentDirection = overrideDirection || getStoredDirection();
+      setDirection(currentDirection);
+
+      // ÉTAT 4 : Recherche des alertes sur le trajet
+      setStatus('LOADING_ALERTS');
+
+      // 3. Charger et filtrer les alertes pertinentes via getRelevantAlertsForDriver()
+      const result = await getRelevantAlertsForDriver(
+        coords.latitude,
+        coords.longitude,
+        currentDirection,
+        overrideNow || Date.now()
+      );
+
+      if (!isMountedRef.current) return;
+
+      // ÉTAT 3 : Chauffeur hors corridor
+      if (!result.isDriverOnCorridor) {
+        setStatus('OFF_CORRIDOR');
+        return;
+      }
+
+      // ÉTAT 5 : Aucune alerte pertinente
+      if (!result.relevantAlerts || result.relevantAlerts.length === 0) {
+        setRelevantAlertItems([]);
+        setStatus('EMPTY');
+        return;
+      }
+
+      // ÉTAT 6 / PRÊT : Alertes pertinentes disponibles (relevantAlerts uniquement)
+      setRelevantAlertItems(result.relevantAlerts as PrioritizedAlertItem<AlertItem>[]);
+      setStatus('READY');
+    } catch (err: any) {
+      if (!isMountedRef.current) return;
+      console.error('[AlertsScreen] Erreur de récupération des alertes :', err);
+      // ÉTAT 6 : Erreur réseau / Firestore
+      setStatus('ERROR');
+    } finally {
+      isLocatingRef.current = false;
+    }
+  }, [overrideCoordinates, overrideDirection, overrideNow]);
+
   // Capture ponctuelle unique lors du montage (aucun suivi continu, aucun polling, aucun tracking)
   useEffect(() => {
-    let isMounted = true;
-
-    const loadAlerts = async () => {
-      // ÉTAT 1 : Localisation en cours
-      setStatus('LOCATING');
-
-      try {
-        // 1. Obtenir la position GPS ponctuelle (un seul appel lors du montage)
-        const coords = overrideCoordinates !== undefined
-          ? overrideCoordinates
-          : await getCurrentLocation();
-
-        if (!isMounted) return;
-
-        // ÉTAT 2 : Si GPS refusé ou indisponible -> état explicite sans inventer de coordonnées
-        if (
-          !coords ||
-          typeof coords.latitude !== 'number' ||
-          typeof coords.longitude !== 'number' ||
-          isNaN(coords.latitude) ||
-          isNaN(coords.longitude)
-        ) {
-          setStatus('GPS_UNAVAILABLE');
-          return;
-        }
-
-        // 2. Déterminer la direction mémorisée
-        const currentDirection = overrideDirection || getStoredDirection();
-        setDirection(currentDirection);
-
-        // ÉTAT 4 : Recherche des alertes sur le trajet
-        setStatus('LOADING_ALERTS');
-
-        // 3. Charger et filtrer les alertes pertinentes via getRelevantAlertsForDriver()
-        const result = await getRelevantAlertsForDriver(
-          coords.latitude,
-          coords.longitude,
-          currentDirection,
-          overrideNow || Date.now()
-        );
-
-        if (!isMounted) return;
-
-        // ÉTAT 3 : Chauffeur hors corridor
-        if (!result.isDriverOnCorridor) {
-          setStatus('OFF_CORRIDOR');
-          return;
-        }
-
-        // ÉTAT 5 : Aucune alerte pertinente
-        if (!result.relevantAlerts || result.relevantAlerts.length === 0) {
-          setRelevantAlertItems([]);
-          setStatus('EMPTY');
-          return;
-        }
-
-        // ÉTAT 6 / PRÊT : Alertes pertinentes disponibles (relevantAlerts uniquement)
-        setRelevantAlertItems(result.relevantAlerts as PrioritizedAlertItem<AlertItem>[]);
-        setStatus('READY');
-      } catch (err: any) {
-        if (!isMounted) return;
-        console.error('[AlertsScreen] Erreur de récupération des alertes :', err);
-        // ÉTAT 6 : Erreur réseau / Firestore
-        setStatus('ERROR');
-      }
-    };
-
-    loadAlerts();
+    isMountedRef.current = true;
+    loadAlerts(false);
 
     return () => {
-      isMounted = false;
+      isMountedRef.current = false;
     };
-  }, [overrideCoordinates, overrideDirection, overrideNow]);
+  }, [loadAlerts]);
 
   const handleTogglePlayAudio = (e: React.MouseEvent, alert: AlertItem) => {
     e.stopPropagation();
@@ -277,8 +303,19 @@ export const AlertsScreen: React.FC<AlertsScreenProps> = ({
             📍 Position GPS indisponible
           </h2>
           <p className="text-xs text-[#5a6573] max-w-xs">
-            Activez la géolocalisation pour identifier les alertes pertinentes sur votre trajet.
+            {gpsErrorMsg || 'Activez la géolocalisation pour identifier les alertes pertinentes sur votre trajet.'}
           </p>
+          <div className="mt-5 pt-3 border-t border-slate-100 flex flex-col items-center w-full">
+            <button
+              type="button"
+              onClick={() => loadAlerts(true)}
+              className="inline-flex items-center justify-center gap-2 px-5 py-2.5 bg-[#002541] hover:bg-[#123b5d] active:bg-[#00182b] text-white text-xs font-bold rounded-xl shadow-xs transition-colors cursor-pointer"
+            >
+              <span className="material-symbols-outlined text-[18px]">refresh</span>
+              <span>Réessayer le GPS</span>
+            </button>
+            <span className="text-[10px] text-[#5a6573] mt-2">Capture ponctuelle unique sans suivi continu</span>
+          </div>
         </div>
       </div>
     );
@@ -302,6 +339,16 @@ export const AlertsScreen: React.FC<AlertsScreenProps> = ({
           <p className="text-xs text-[#5a6573] max-w-xs">
             La veille active ne surveille que les axes du corridor N4.
           </p>
+          <div className="mt-4 pt-3 border-t border-amber-100 flex flex-col items-center w-full">
+            <button
+              type="button"
+              onClick={() => loadAlerts(true)}
+              className="inline-flex items-center justify-center gap-2 px-4 py-2 bg-[#914d00] hover:bg-[#723b00] active:bg-[#522900] text-white text-xs font-bold rounded-xl shadow-xs transition-colors cursor-pointer"
+            >
+              <span className="material-symbols-outlined text-[16px]">refresh</span>
+              <span>Réessayer le GPS</span>
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -319,6 +366,16 @@ export const AlertsScreen: React.FC<AlertsScreenProps> = ({
           <p className="text-xs text-[#5a6573] max-w-xs">
             Vérifiez votre connexion Internet.
           </p>
+          <div className="mt-4 pt-3 border-t border-red-100 flex flex-col items-center w-full">
+            <button
+              type="button"
+              onClick={() => loadAlerts(true)}
+              className="inline-flex items-center justify-center gap-2 px-4 py-2 bg-[#002541] hover:bg-[#123b5d] active:bg-[#00182b] text-white text-xs font-bold rounded-xl shadow-xs transition-colors cursor-pointer"
+            >
+              <span className="material-symbols-outlined text-[16px]">refresh</span>
+              <span>Réessayer</span>
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -343,10 +400,14 @@ export const AlertsScreen: React.FC<AlertsScreenProps> = ({
             ✓
           </div>
           <h2 className="text-base font-black text-[#2e7d32] mb-1">
-            ✓ Aucune alerte pertinente
+            {typeof navigator !== 'undefined' && !navigator.onLine
+              ? 'Mode hors-ligne'
+              : '✓ Aucune alerte pertinente'}
           </h2>
           <p className="text-xs text-[#5a6573] max-w-xs">
-            Votre trajet semble dégagé pour le moment.
+            {typeof navigator !== 'undefined' && !navigator.onLine
+              ? 'Connexion réseau indisponible. Impossible d’actualiser les alertes.'
+              : 'Aucune alerte pertinente disponible pour le moment.'}
           </p>
         </div>
       </div>
@@ -386,7 +447,18 @@ export const AlertsScreen: React.FC<AlertsScreenProps> = ({
           return (
             <article
               key={alert.id}
-              onClick={() => onSelectAlert?.(alert)}
+              onClick={() => {
+                const context: AlertDetailContext = {
+                  estimatedDistanceKm: item.estimatedDistanceKm,
+                  relativePosition: item.relativePosition,
+                  priorityLevel,
+                  priorityScore: item.priorityScore,
+                  priorityReason: item.priorityReason,
+                  alertPk: item.alertPk,
+                  driverPk: item.driverPk,
+                };
+                onSelectAlert?.(alert, context);
+              }}
               className={`relative bg-white rounded-2xl shadow-sm border p-4 flex flex-col gap-3 transition-all cursor-pointer active:bg-slate-50 ${getPriorityBorder(priorityLevel)}`}
             >
               {/* Type d'alerte, Priorité et horodatage */}

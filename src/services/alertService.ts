@@ -16,6 +16,7 @@ import { db, handleFirestoreError, OperationType } from './firebase';
 import { AlertItem, AlertRecord, AlertStatus } from '../types/routeguard';
 import { INITIAL_ALERTS } from '../data/initialAlerts';
 import { authService } from './authService';
+import { alertCacheService } from './alertCacheService';
 import {
   corridorService,
   filterRelevantAlerts,
@@ -47,9 +48,13 @@ export class FirebaseAlertService {
   private activeDriver: string = 'Chauffeur A (Jean)';
   private isSeeded: boolean = false;
   private cachedAlerts: AlertItem[] = [];
+  private cacheRestored: boolean = false;
+  private cacheRestorePromise: Promise<void> | null = null;
+  private hasReceivedLiveFirestoreData: boolean = false;
 
   private constructor() {
     this.initActiveDriver();
+    this.initPersistentCache().catch(() => {});
   }
 
   public static getInstance(): FirebaseAlertService {
@@ -57,6 +62,58 @@ export class FirebaseAlertService {
       FirebaseAlertService.instance = new FirebaseAlertService();
     }
     return FirebaseAlertService.instance;
+  }
+
+  /**
+   * Initialise et restaure le cache persistant IndexedDB en mémoire (Étape J-1-3-9-B1.2).
+   * Protégé contre les accès concurrents et les courses asynchrones avec Firestore.
+   */
+  public async initPersistentCache(): Promise<void> {
+    if (this.cacheRestored) return;
+    if (this.cacheRestorePromise) return this.cacheRestorePromise;
+
+    this.cacheRestorePromise = (async () => {
+      try {
+        const persistedAlerts = await alertCacheService.getAll();
+        // Protection contre les courses asynchrones :
+        // Si Firestore a déjà fourni des données plus fraîches pendant la lecture IndexedDB,
+        // ne JAMAIS écraser les données Firestore avec des données persistées potentiellement obsolètes.
+        if (!this.hasReceivedLiveFirestoreData) {
+          if (persistedAlerts && persistedAlerts.length > 0) {
+            this.cachedAlerts = this.recomputeUserConfirmed(persistedAlerts);
+          }
+        }
+      } catch (err) {
+        console.warn('[FirebaseAlertService] Échec restauration cache persistant :', err);
+      } finally {
+        this.cacheRestored = true;
+      }
+    })();
+
+    return this.cacheRestorePromise;
+  }
+
+  /**
+   * Recalcule dynamiquement le statut userConfirmed pour une liste d'alertes en fonction
+   * du chauffeur actif et de l'UID Firebase courant.
+   */
+  private recomputeUserConfirmed(
+    alerts: AlertItem[],
+    driverName: string = this.activeDriver,
+    currentUid: string | null = authService.getCurrentUserId()
+  ): AlertItem[] {
+    return alerts.map((alert) => {
+      let isConfirmed = false;
+      if (alert.confirmedByUids && alert.confirmedByUids.length > 0 && currentUid) {
+        isConfirmed = alert.confirmedByUids.includes(currentUid);
+      } else {
+        isConfirmed = (alert.confirmedBy || []).includes(driverName);
+      }
+      return {
+        ...alert,
+        userConfirmed: isConfirmed,
+      };
+    });
   }
 
   private initActiveDriver(): void {
@@ -70,39 +127,32 @@ export class FirebaseAlertService {
   }
 
   /**
-   * Initialise les données de référence sur Firestore si la collection est vide
+   * Vérifie de manière sûre et contextuelle si un document Firestore est une donnée de démonstration
+   * historique, évitant ainsi qu'elle soit présentée comme un danger réel sans pénaliser une alerte réelle (Étape J-1-3-8-C).
    */
-  private async seedInitialAlertsIfEmpty(): Promise<void> {
-    if (this.isSeeded) return;
-    this.isSeeded = true;
-
-    try {
-      const snapshot = await getDocs(query(collection(db, ALERTS_COLLECTION), limit(1)));
-      if (snapshot.empty) {
-        // Ensemencer les alertes initiales
-        for (const alert of INITIAL_ALERTS) {
-          const docRef = doc(db, ALERTS_COLLECTION, alert.id);
-          await setDoc(docRef, {
-            id: alert.id,
-            type: alert.type,
-            description: alert.description || alert.title,
-            location: alert.location || alert.sector,
-            direction: alert.direction.replace('→', '').trim(),
-            route: alert.route || 'Yaoundé-Bafoussam',
-            status: 'CONFIRMED',
-            confirmationCount: alert.confirmationsCount || alert.confirmationCount || 1,
-            audioDuration: alert.audioDuration || '0:12',
-            audioTranscript: alert.audioTranscript || alert.description,
-            createdBy: alert.createdBy || 'Chauffeur N4',
-            createdAt: alert.createdAt || Date.now(),
-            confirmedBy: alert.confirmedBy || ['Chauffeur 101', 'Chauffeur 104', 'Chauffeur 208', 'Chauffeur 312'],
-          });
-        }
-      }
-    } catch (error) {
-      // Ignorer si la collection a déjà des documents ou si hors-ligne
-      console.warn('Initial seeding verification:', error);
+  public isDemoAlertDoc(id: string, data: any): boolean {
+    if (!data) return false;
+    if (data.isDemo === true) return true;
+    // Données de démonstration du seed historique :
+    // Uniquement si l'identifiant correspond à alert-1/alert-2/alert-3, sans UID de créateur réel,
+    // et sans coordonnées GPS réelles.
+    if (
+      (id === 'alert-1' || id === 'alert-2' || id === 'alert-3') &&
+      !data.createdByUid &&
+      typeof data.latitude !== 'number'
+    ) {
+      return true;
     }
+    return false;
+  }
+
+  /**
+   * @deprecated Étape J-1-3-8-C : Supprimé du flux de production pour ne plus jamais
+   * publier automatiquement de données de démonstration dans Firestore.
+   */
+  public async seedInitialAlertsIfEmpty(): Promise<void> {
+    // Comportement automatique supprimé pour préserver l'intégrité opérationnelle de Firestore.
+    return;
   }
 
   /**
@@ -184,11 +234,18 @@ export class FirebaseAlertService {
   }
 
   /**
-   * Abonnement temps réel à la collection Firestore 'alerts'
+   * Abonnement temps réel à la collection Firestore 'alerts' (Étape J-1-3-9-B1.2)
    */
   public subscribeAlerts(callback: (alerts: AlertItem[]) => void): () => void {
-    // Tenter l'ensemencement au démarrage si nécessaire
-    this.seedInitialAlertsIfEmpty();
+    // Si le cache persistant n'a pas encore fini d'être restauré et qu'aucune donnée Firestore n'a été reçue,
+    // on amorce la restauration pour émettre immédiatement les données persistées hors ligne
+    if (!this.cacheRestored && !this.hasReceivedLiveFirestoreData) {
+      this.initPersistentCache().then(() => {
+        if (!this.hasReceivedLiveFirestoreData && this.cachedAlerts.length > 0) {
+          callback(this.cachedAlerts);
+        }
+      }).catch(() => {});
+    }
 
     const alertsQuery = query(
       collection(db, ALERTS_COLLECTION),
@@ -200,21 +257,22 @@ export class FirebaseAlertService {
       (snapshot) => {
         const items: AlertItem[] = [];
         snapshot.forEach((docSnap) => {
-          items.push(this.mapDocToAlertItem(docSnap.id, docSnap.data()));
+          const data = docSnap.data();
+          if (!this.isDemoAlertDoc(docSnap.id, data)) {
+            items.push(this.mapDocToAlertItem(docSnap.id, data));
+          }
         });
 
-        // Si Firestore est pour le moment vide, utiliser les alertes locales initiales en attendant
-        if (items.length === 0 && INITIAL_ALERTS.length > 0) {
-          const defaults = INITIAL_ALERTS.map(a => ({
-            ...a,
-            userConfirmed: (a.confirmedBy || []).includes(this.activeDriver),
-          }));
-          this.cachedAlerts = defaults;
-          callback(defaults);
-        } else {
-          this.cachedAlerts = items;
-          callback(items);
-        }
+        // Séparation absolue : ne JAMAIS injecter INITIAL_ALERTS lorsque Firestore est vide
+        this.hasReceivedLiveFirestoreData = true;
+        this.cachedAlerts = items;
+
+        // Persistance atomique dans IndexedDB (vide le cache persistant si snapshot est vide)
+        alertCacheService.saveAll(items).catch((err) => {
+          console.warn('[FirebaseAlertService] Échec persistance snapshot IndexedDB :', err);
+        });
+
+        callback(items);
       },
       (error) => {
         handleFirestoreError(error, OperationType.GET, ALERTS_COLLECTION);
@@ -227,19 +285,45 @@ export class FirebaseAlertService {
   }
 
   /**
-   * Récupère la liste des alertes une fois
+   * Récupère la liste des alertes une fois (Étape J-1-3-9-B1.2)
+   * - Restaure le cache persistant si nécessaire avant l'interrogation réseau.
+   * - Lorsque Firestore réussit : met à jour la RAM et IndexedDB (vide les deux si 0 alerte).
+   * - Lorsque Firestore est indisponible : conserve le cache existant (restauré depuis IndexedDB).
    */
   public async getAlerts(): Promise<AlertItem[]> {
+    // S'assurer que le cache persistant a été restauré avant la requête si pas encore fait
+    if (!this.cacheRestored && !this.hasReceivedLiveFirestoreData) {
+      await this.initPersistentCache();
+    }
+
     try {
       const q = query(collection(db, ALERTS_COLLECTION), orderBy('createdAt', 'desc'));
       const snapshot = await getDocs(q);
       const items: AlertItem[] = [];
       snapshot.forEach((docSnap) => {
-        items.push(this.mapDocToAlertItem(docSnap.id, docSnap.data()));
+        const data = docSnap.data();
+        if (!this.isDemoAlertDoc(docSnap.id, data)) {
+          items.push(this.mapDocToAlertItem(docSnap.id, data));
+        }
       });
-      return items.length > 0 ? items : INITIAL_ALERTS;
+
+      // Met à jour le cache opérationnel
+      this.hasReceivedLiveFirestoreData = true;
+      this.cachedAlerts = items;
+
+      // Persistance atomique dans IndexedDB (vide le cache persistant si items est vide)
+      alertCacheService.saveAll(items).catch((err) => {
+        console.warn('[FirebaseAlertService] Échec persistance getAlerts IndexedDB :', err);
+      });
+
+      return items;
     } catch {
-      return this.cachedAlerts.length > 0 ? this.cachedAlerts : INITIAL_ALERTS;
+      // En cas d'indisponibilité Firestore : s'assurer que le cache a été restauré
+      if (!this.cacheRestored) {
+        await this.initPersistentCache();
+      }
+      // Utiliser le cache existant s'il contient des données, sinon renvoyer une liste vide
+      return this.cachedAlerts.length > 0 ? this.cachedAlerts : [];
     }
   }
 
@@ -571,6 +655,26 @@ export class FirebaseAlertService {
       details: `relevantCount: ${resultT07.relevantAlerts.length} (attendu 0), excludedReason: ${resultT07.excludedAlerts[0]?.reason}`,
     });
 
+    // =========================================================================
+    // TESTS J-1-3-8-C : SÉPARATION DES DONNÉES DE DÉMONSTRATION ET OPÉRATIONNELLES
+    // =========================================================================
+
+    // C01 : isDemoAlertDoc identifie correctement un document marqué isDemo: true
+    const isDemoTrue = this.isDemoAlertDoc('any-id', { isDemo: true, type: 'ACCIDENT' });
+    // C02 : isDemoAlertDoc identifie le document seed historique (alert-1 sans createdByUid et sans coordonnées)
+    const isSeedDemo = this.isDemoAlertDoc('alert-1', { type: 'ACCIDENT', description: 'Accident à 8 km' });
+    // C03 : isDemoAlertDoc NE rejette PAS une alerte réelle avec id alert-1 mais possédant un createdByUid
+    const isRealWithDemoId = this.isDemoAlertDoc('alert-1', { type: 'ACCIDENT', createdByUid: 'user-real-123', latitude: 4.6000 });
+    // C04 : isDemoAlertDoc NE rejette PAS une alerte réelle standard
+    const isRealStandard = this.isDemoAlertDoc('alert-1791000-xyz', { type: 'OBSTACLE', createdByUid: 'user-456', latitude: 4.7500 });
+
+    const isDemoFilterStrict = isDemoTrue && isSeedDemo && !isRealWithDemoId && !isRealStandard;
+    results.push({
+      name: 'J-1-3-8-C - T01 : Détection sûre des données de démonstration sans exclusion arbitraire d\'alertes réelles',
+      passed: isDemoFilterStrict,
+      details: `demoTrue: ${isDemoTrue}, seedDemo: ${isSeedDemo}, realWithDemoIdPreserved: ${!isRealWithDemoId}, realStandardPreserved: ${!isRealStandard}`,
+    });
+
     return results;
   }
 
@@ -762,6 +866,8 @@ export class FirebaseAlertService {
         if (currentUid && !existingAlert.confirmedByUids?.includes(currentUid)) {
           existingAlert.confirmedByUids = [...(existingAlert.confirmedByUids || []), currentUid];
         }
+        // Persister la mise à jour locale
+        alertCacheService.saveAll(this.cachedAlerts).catch(() => {});
       }
 
       return { success: true, newCount: updatedCount };
@@ -784,18 +890,7 @@ export class FirebaseAlertService {
     const currentUid = authService.getCurrentUserId();
 
     // Mise à jour immédiate du statut de confirmation par rapport au nouveau chauffeur actif
-    this.cachedAlerts = this.cachedAlerts.map((alert) => {
-      let isConfirmed = false;
-      if (alert.confirmedByUids && alert.confirmedByUids.length > 0 && currentUid) {
-        isConfirmed = alert.confirmedByUids.includes(currentUid);
-      } else {
-        isConfirmed = (alert.confirmedBy || []).includes(driverName);
-      }
-      return {
-        ...alert,
-        userConfirmed: isConfirmed,
-      };
-    });
+    this.cachedAlerts = this.recomputeUserConfirmed(this.cachedAlerts, driverName, currentUid);
   }
 
   public getSourceInfo(): AlertDataSourceInfo {
@@ -813,6 +908,7 @@ export class FirebaseAlertService {
         const docRef = doc(db, ALERTS_COLLECTION, alert.id);
         await setDoc(docRef, {
           id: alert.id,
+          isDemo: true,
           type: alert.type,
           description: alert.description || alert.title,
           location: alert.location || alert.sector,
