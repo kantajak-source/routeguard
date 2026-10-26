@@ -10,12 +10,14 @@ import { HomeScreen } from './components/screens/HomeScreen';
 import { ReportFlowScreen } from './components/screens/ReportFlowScreen';
 import { AlertsScreen } from './components/screens/AlertsScreen';
 import { AlertDetailScreen, AlertDetailContext } from './components/screens/AlertDetailScreen';
+import { RouteMapScreen } from './components/screens/RouteMapScreen';
 import { ProfileScreen } from './components/screens/ProfileScreen';
 import { AuthScreen } from './components/screens/AuthScreen';
 
 export default function App() {
   const [activeScreen, setActiveScreen] = useState<ActiveScreen>('accueil');
   const [alerts, setAlerts] = useState<AlertItem[]>([]);
+  const [quotaExceeded, setQuotaExceeded] = useState<boolean>(false);
   const [selectedAlertId, setSelectedAlertId] = useState<string | null>(null);
   const [selectedAlertContext, setSelectedAlertContext] = useState<AlertDetailContext | null>(null);
   const [detailReturnScreen, setDetailReturnScreen] = useState<ActiveScreen>('alertes');
@@ -79,6 +81,15 @@ export default function App() {
       });
     }
   }, [currentUser]);
+
+  // Quota defense listener for Google Maps Platform
+  useEffect(() => {
+    const handleQuota = () => setQuotaExceeded(true);
+    window.addEventListener('gmp-quota-exceeded', handleQuota);
+    return () => {
+      window.removeEventListener('gmp-quota-exceeded', handleQuota);
+    };
+  }, []);
 
   // Derived selected alert guarantees 100% synchronization with the master alerts state
   const selectedAlert = alerts.find((a) => a.id === selectedAlertId) || null;
@@ -167,6 +178,24 @@ export default function App() {
           </div>
         )}
 
+        {/* Google Maps Quota Warning Banner (Tier 1 Defense) */}
+        {quotaExceeded && (
+          <div className="bg-amber-50 border-b border-amber-200 text-amber-900 px-4 py-2.5 text-xs md:text-sm text-center sticky top-0 z-50 shadow-sm">
+            <span>
+              Google Maps Platform quota reached. If you are the app owner, visit{' '}
+              <a
+                href="https://developers.google.com/maps/ai/ai-studio?utm_campaign=gmp_mcp_codeassist_v1_aistudio#quota_exceeded_errors"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="underline font-semibold text-amber-950 hover:text-amber-800"
+              >
+                maps developer site
+              </a>{' '}
+              for instructions to update your account.
+            </span>
+          </div>
+        )}
+
         {/* Global RouteGuard Header */}
         <Header
           activeScreen={activeScreen}
@@ -189,6 +218,7 @@ export default function App() {
               onStartReport={handleStartReport}
               onViewAlertDetail={(alert, context) => handleViewAlertDetail(alert, context, 'accueil')}
               onViewAllAlerts={() => handleNavigate('alertes')}
+              onOpenMap={() => handleNavigate('carte')}
               isAudioMuted={isAudioMuted}
               activeDriver={activeDriver}
             />
@@ -213,12 +243,21 @@ export default function App() {
             />
           )}
 
+          {activeScreen === 'carte' && (
+            <RouteMapScreen
+              alerts={alerts}
+              onViewAlertDetail={(alert, context) => handleViewAlertDetail(alert, context, 'carte')}
+              onNavigateToReport={handleStartReport}
+            />
+          )}
+
           {activeScreen === 'alerte_detail' && selectedAlert && (
             <AlertDetailScreen
               alert={selectedAlert}
               context={selectedAlertContext}
               onBack={() => handleNavigate(detailReturnScreen)}
               onConfirmAlert={handleConfirmAlert}
+              onOpenFullMap={() => handleNavigate('carte')}
               isAudioMuted={isAudioMuted}
             />
           )}

@@ -82,6 +82,7 @@ interface HomeScreenProps {
   onStartReport: () => void;
   onViewAlertDetail: (alert: AlertItem, context?: AlertDetailContext) => void;
   onViewAllAlerts: () => void;
+  onOpenMap?: () => void;
   isAudioMuted: boolean;
   activeDriver?: string;
   overrideCoordinates?: LocationCoordinates | null;
@@ -94,6 +95,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   onStartReport,
   onViewAlertDetail,
   onViewAllAlerts,
+  onOpenMap,
   isAudioMuted,
   activeDriver = 'Chauffeur A (Jean)',
   overrideCoordinates,
@@ -643,6 +645,31 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
           </span>
         </div>
       )}
+
+      {/* 4.5 CARTE INTERACTIVE N4 (Google Maps Platform) */}
+      <div 
+        onClick={onOpenMap}
+        className="w-full bg-gradient-to-r from-[#002541] to-[#0284c7] rounded-2xl p-3.5 text-white shadow-md flex items-center justify-between cursor-pointer hover:shadow-lg transition-all active:scale-[0.99] border border-sky-400/30"
+      >
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="w-10 h-10 rounded-xl bg-white/15 backdrop-blur-sm border border-white/20 flex items-center justify-center shrink-0">
+            <span className="material-symbols-outlined text-[22px] text-sky-200">map</span>
+          </div>
+          <div className="flex flex-col min-w-0">
+            <span className="text-xs font-black tracking-wide flex items-center gap-1.5 text-white uppercase">
+              <span>Carte Interactive N4</span>
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+            </span>
+            <span className="text-[11px] text-sky-100/90 truncate">
+              {alerts.length} alerte{alerts.length > 1 ? 's' : ''} tracée{alerts.length > 1 ? 's' : ''} sur Google Maps • Yaoundé ⇄ Bafoussam
+            </span>
+          </div>
+        </div>
+        <div className="shrink-0 flex items-center gap-1 bg-white/20 hover:bg-white/30 text-white text-xs font-bold px-2.5 py-1.5 rounded-lg transition-colors">
+          <span>Voir</span>
+          <span className="material-symbols-outlined text-[16px]">chevron_right</span>
+        </div>
+      </div>
 
       {/* 5. MAIN ACTION BUTTON: 🎙️ SIGNALER UN ÉVÉNEMENT */}
       <div className="pt-1">

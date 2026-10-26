@@ -1,9 +1,10 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { APIProvider, Map, AdvancedMarker } from '@vis.gl/react-google-maps';
 import { AlertItem } from '../../types/routeguard';
 import { voiceService } from '../../services/voiceService';
 import { authService } from '../../services/authService';
-import { DEFAULT_MAX_ALERT_AGE_MINUTES, PriorityLevel } from '../../services/corridorService';
-import { ArrowLeft, Check, AlertTriangle, Play, Pause } from 'lucide-react';
+import { DEFAULT_MAX_ALERT_AGE_MINUTES, PriorityLevel, corridorService } from '../../services/corridorService';
+import { ArrowLeft, Check, AlertTriangle, Play, Pause, MapPin, ExternalLink } from 'lucide-react';
 
 /**
  * Normalise le nom affiché du TYPE dans le badge selon alert.type (Étape J-1-3-7)
@@ -192,6 +193,7 @@ interface AlertDetailScreenProps {
   onBack: () => void;
   onConfirmAlert: (alertId: string) => void;
   isAudioMuted: boolean;
+  onOpenFullMap?: () => void;
   /** Horodatage de référence optionnel pour tests déterministes */
   overrideNow?: number | string | Date;
 }
@@ -202,6 +204,7 @@ export const AlertDetailScreen: React.FC<AlertDetailScreenProps> = ({
   onBack,
   onConfirmAlert,
   isAudioMuted,
+  onOpenFullMap,
   overrideNow,
 }) => {
   // Détermination de propriété de l'alerte basée strictement sur l'UID Firebase réel
@@ -217,6 +220,26 @@ export const AlertDetailScreen: React.FC<AlertDetailScreenProps> = ({
   const nowMs = typeof overrideNow === 'number'
     ? overrideNow
     : (overrideNow instanceof Date ? overrideNow.getTime() : Date.now());
+
+  const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
+
+  const alertCoords = useMemo(() => {
+    let lat = alert.latitude;
+    let lng = alert.longitude;
+    if (typeof lat !== 'number' || typeof lng !== 'number' || isNaN(lat) || isNaN(lng)) {
+      const marker = corridorService.findMarkerByName(
+        alert.sector || alert.location || alert.title || ''
+      );
+      if (marker) {
+        lat = marker.latitude;
+        lng = marker.longitude;
+      }
+    }
+    if (typeof lat === 'number' && typeof lng === 'number' && !isNaN(lat) && !isNaN(lng)) {
+      return { lat, lng };
+    }
+    return null;
+  }, [alert]);
 
   const parseCreatedAt = (raw: unknown): number | null => {
     if (raw === undefined || raw === null) return null;
@@ -470,6 +493,53 @@ export const AlertDetailScreen: React.FC<AlertDetailScreenProps> = ({
           </div>
         )}
       </div>
+
+      {/* Visualisation Google Maps du danger */}
+      {alertCoords && (
+        <div className="w-full bg-white rounded-3xl p-3.5 shadow-sm border border-slate-200/80 flex flex-col gap-2">
+          <div className="flex items-center justify-between px-1">
+            <span className="text-[11px] font-black uppercase tracking-wider text-[#002541] flex items-center gap-1.5">
+              <MapPin className="w-4 h-4 text-red-600" />
+              <span>Localisation précise Google Maps</span>
+            </span>
+            {onOpenFullMap && (
+              <button
+                type="button"
+                onClick={onOpenFullMap}
+                className="text-[11px] font-bold text-sky-700 hover:text-sky-900 flex items-center gap-1"
+              >
+                <span>Plein écran</span>
+                <ExternalLink className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+          <div className="w-full h-44 rounded-2xl overflow-hidden border border-slate-200 relative">
+            <APIProvider apiKey={apiKey} language="fr" region="CM">
+              <Map
+                mapId="DEMO_MAP_ID"
+                defaultCenter={alertCoords}
+                defaultZoom={11}
+                gestureHandling="cooperative"
+                disableDefaultUI={true}
+                internalUsageAttributionIds={['gmp_mcp_codeassist_v1_aistudio']}
+                style={{ width: '100%', height: '100%' }}
+              >
+                <AdvancedMarker position={alertCoords} title={alert.title}>
+                  <div className="relative cursor-pointer">
+                    <div className="w-8 h-8 rounded-full bg-red-600 ring-4 ring-red-200 border-2 border-white shadow-lg flex items-center justify-center text-sm">
+                      <span>{getAlertIcon(alert.type)}</span>
+                    </div>
+                  </div>
+                </AdvancedMarker>
+              </Map>
+            </APIProvider>
+          </div>
+          <div className="flex items-center justify-between text-[11px] text-slate-500 px-1 pt-0.5">
+            <span>Secteur : <strong className="text-slate-800">{alert.sector || alert.location || 'Corridor N4'}</strong></span>
+            <span>Axe N4 Cameroun</span>
+          </div>
+        </div>
+      )}
 
       {isOwnAlert ? (
         /* VOLET DE SUIVI D'IMPACT POUR L'AUTEUR DU SIGNALEMENT */

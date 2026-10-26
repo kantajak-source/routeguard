@@ -83,10 +83,24 @@ export const BottomNav: React.FC<BottomNavProps> = ({
           </span>
         </button>
 
+        {/* CARTE */}
+        <button
+          onClick={() => onNavigate('carte')}
+          className={`flex flex-col items-center justify-center min-w-[52px] min-h-[48px] transition-colors ${
+            activeScreen === 'carte'
+              ? 'text-[#002541] font-bold'
+              : 'text-[#5a6573] hover:text-[#002541]'
+          }`}
+          type="button"
+        >
+          <span className="material-symbols-outlined text-[24px]">map</span>
+          <span className="text-[11px] font-semibold mt-0.5">Carte</span>
+        </button>
+
         {/* PROFIL */}
         <button
           onClick={() => onNavigate('profil')}
-          className={`flex flex-col items-center justify-center min-w-[56px] min-h-[48px] transition-colors ${
+          className={`flex flex-col items-center justify-center min-w-[52px] min-h-[48px] transition-colors ${
             activeScreen === 'profil'
               ? 'text-[#002541] font-bold'
               : 'text-[#5a6573] hover:text-[#002541]'
